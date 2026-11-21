@@ -68,12 +68,17 @@ lighthouse.
 ## Using one
 
 Settings → Lighthouse, or `lighthouse.urls` in `sharerr.toml`: one or more
-lighthouse base URLs, self-hosted by a friend or by you.
+lighthouse base URLs, self-hosted by a friend or by you, or the project's
+public one at `https://lighthouse.edenlabs.dev`, for a friend group that would
+rather not run their own.
 
 ```toml
 [lighthouse]
-urls = ["https://a-friends-lighthouse.example"]
+urls = ["https://lighthouse.edenlabs.dev"]
 ```
+
+Every friend in a group lists the same lighthouse: a report reaches only the
+lighthouses its sender lists, and a lookup asks only the ones its caller lists.
 
 With at least one set, sharerr reports its own endpoint to every URL listed,
 once per active friend's issued-key hash (a lighthouse indexes by key hash
@@ -124,9 +129,9 @@ own.
 holds four root modules — one t3.micro on AWS, one B1s VM on Azure, one
 small machine on Fly.io, one Nanode on Linode — that stand up the container above with a
 persistent `/data`, a stable address, and TLS (Caddy with your domain on the
-VMs; built in on Fly). The README there says what each actually costs. This
-is how to run one on neutral ground for a friend group; it is not a public
-instance the project hosts, and there is none.
+VMs; built in on Fly). The README there says what each actually costs. The
+project's public instance ([Using one](#using-one)) runs from the Linode
+module.
 
 **Embedded in sharerr.** For a single operator who would rather not run a
 second container, it can run as extra routes on one of sharerr's own

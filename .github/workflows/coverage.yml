@@ -1,21 +1,14 @@
 name: Coverage
 
-# Line/region coverage over the hermetic (tier 1) test suite, via
-# cargo-llvm-cov, after every green CI run on `main` and on dispatch: measure,
-# publish the badge figures as an artifact for pages.yml, and fail below the
-# floor in scripts/check.sh (COVERAGE_FLOOR_LINES). A pull request's figure
-# comes from ci.yml's `test` job, which runs this suite this way already.
+# Coverage of the tier-1 suite via cargo-llvm-cov, after every green CI run on
+# `main` and on dispatch: measure, upload the badge figures for pages.yml, and
+# fail below scripts/check.sh's COVERAGE_FLOOR_LINES. A pull request's figure
+# comes from ci.yml's `test` job. Tier 1 only, since the docker-backed tiers
+# cannot run here.
 #
-# Tier 1 only, deliberately: this runs the same suite ci.yml's `test` job
-# does, not `--include-ignored`. The tier 2 suite drives a real Docker Compose
-# stack (see docs/TESTING.md) — coverage over a suite this workflow cannot run
-# would just be a misleading percentage.
-#
-# It chains off a green CI run rather than `push: branches: [main]` directly:
-# only a tree `cargo test` already passed on is worth a full instrumented
-# rebuild. See pages.yml's header for why a workflow_run trigger is safe despite
-# zizmor's default suspicion of it: no job here checks out the triggering run's
-# ref.
+# Chained off a green CI run, since only a tree `cargo test` passed on is
+# worth an instrumented rebuild. pages.yml's header says why the workflow_run
+# trigger is safe: no job here checks out the triggering run's ref.
 on:
   workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]

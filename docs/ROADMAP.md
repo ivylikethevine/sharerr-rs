@@ -13,44 +13,34 @@ attached.
 
 ## Where it stands
 
-As of 2026-11-17, branch `dev`.
+As of 2026-11-20, branch `dev`, two commits past v0.2.5.
 
-- The theme toggle's empty phone-width state is fixed in the tree (the
-  toggle is exempt from the 32rem rule hiding bar glyphs); it has not been
-  seen in a narrow preview.
-- The repo-wide simplification (2) is applied but for one of its 138 items:
-  cutting the workflow and Dockerfile headers to the why. Four more are held
-  back, since each changes behaviour. The test-helper, compose, CI and docs
-  changes of this batch are edited but not yet built or tested; the
-  path-filter `not-code` anchor in `prepare.yml` relies on paths-filter
-  flattening a YAML alias, which only a CI run proves.
-- The dev profile now builds dependencies with line tables only, and the
-  coverage build runs without an incremental cache, to cut the size of
-  `target/`. Neither the disk saving nor the effect on build and mutant times
-  (5) is measured.
+- The repo-wide simplification is finished: v0.2.5 shipped all but one of its
+  items, and the last, cutting the workflow and Dockerfile headers to the
+  why, is in the tree and passes `scripts/check.sh --fast`. Four items that
+  change behaviour wait under On hold (10 to 13).
+- The public lighthouse is live at `https://lighthouse.edenlabs.dev` (its
+  health route answered on 2026-11-20) and is named in `docs/LIGHTHOUSE.md`
+  and the README.
+- The theme toggle's empty phone-width state is fixed (the toggle is exempt
+  from the 32rem rule hiding bar glyphs); it has not been seen in a narrow
+  preview.
+- The dev profile builds dependencies with line tables only, and the coverage
+  build runs without an incremental cache, to cut the size of `target/`.
+  Neither the disk saving nor the effect on build and mutant times (5) is
+  measured.
 - Open questions: who may call the local hooks (6), and the four held-back
-  simplifications (2).
+  simplifications (10 to 13).
 
 ## Order of work
 
-- The items under Now, smallest first: 2, 3, 4, then 5 a phase at a time.
-  3 and 4 publish outside the repo, so they start on the maintainer's word.
-- 6 once its decision is made, and 7 once Prowlarr allows it.
+- The items under Now: 4, which publishes outside the repo and so starts on
+  the maintainer's word, and 5 a phase at a time.
+- 6 and 10 to 13 once their decisions are made, and 7 once Prowlarr allows it.
 - The items under Later are not scheduled.
 
 ## Now
 
-2. **The repo-wide simplification.** Quality only, with no behaviour change:
-   its checklist,
-   [`docs/plans/repo-simplification.md`](plans/repo-simplification.md), has
-   the one open item, the four held back for a decision, and what was decided
-   and learned while applying the rest. It is deleted, and this item with it,
-   once every item is applied or recorded as held back.
-3. **A public lighthouse.** The software and a Linode module to host it
-   ([`docker/deploy/lighthouse/terraform/linode/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse/terraform/linode))
-   are done; what is missing is a running public instance, with its URL in
-   [`docs/LIGHTHOUSE.md`](LIGHTHOUSE.md), for a friend group that would
-   rather not run their own.
 4. **Unraid and TrueNAS app listings.** Where much of the \*arr audience
    installs from; a Community Applications template and a TrueNAS app.
 5. **Mutation survivors in `sharerr`, in phases.** `scripts/check.sh mutants`
@@ -98,6 +88,20 @@ As of 2026-11-17, branch `dev`.
    listing in Prowlarr's own catalog, so a friend picks "sharerr" and types one
    key, needs Prowlarr to accept a custom base URL for Cardigann indexers. That
    doc says why.
+
+Four simplifications held back from the repo-wide pass, since each changes
+behaviour; each waits on a decision.
+
+10. **Cache the notify webhook and heartbeat URLs** (`notify.rs`'s
+    `stored_url`, and its caller in `commands/serve.rs`). Saves about 1,440
+    Argon2 derivations a day, but a URL the `vault` CLI writes from another
+    process would then take a restart to apply.
+11. **A `light-dark()` palette** in `web/assets/style.css`. Removes about 60
+    lines and narrows browser support to May 2024 and later.
+12. **Drop `.wide .wide`** in `style.css`. Inert, but its comment defends it as
+    documentation.
+13. **Dispatch `preview` and `openapi` before the config loads** in
+    `main.rs`. Drops the error log on a bad config.
 
 ## Later
 

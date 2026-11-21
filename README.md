@@ -347,11 +347,12 @@ its endpoint to and a friend looks up under the key that peer issued them. A
 request without a valid key gets a plausible fabricated answer rather than
 an error, so scraping it yields only noise.
 
-Using one is a Settings → Lighthouse field:
+Using one is a Settings → Lighthouse field, a friend's or the project's
+public one:
 
 ```toml
 [lighthouse]
-urls = ["https://a-friends-lighthouse.example"]
+urls = ["https://lighthouse.edenlabs.dev"]
 ```
 
 Running one, either as its own container (`sharerr-lighthouse`, its own

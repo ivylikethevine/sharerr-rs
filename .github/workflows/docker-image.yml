@@ -1,83 +1,26 @@
-# Builds one runtime target out of docker/Dockerfile. Called twice from
-# docker.yml — once for target: runtime-sharerr, once for target:
-# runtime-lighthouse — which used to be two separate workflow files each
-# carrying their own copy of everything below. Everything that differs
-# between the two images is now an `inputs.*` value; every comment on *why*
-# each piece of this works the way it does lives here with the code it
-# explains, and is not repeated in either caller job.
+# Builds, attests and smoke-tests one runtime target of docker/Dockerfile;
+# docker.yml calls it once per image and publishes both together. What differs
+# between the two images is an input, so the reasons live here, once.
 #
-# This workflow only builds and attests; it does not publish. The one gated
-# retag for both images lives in docker.yml's own `publish` job, downstream of both
-# calls to this workflow, so that job can gate on *both* builds having
-# succeeded before either image moves. See docker.yml for that job and the
-# `environment: release` reasoning that used to live here.
+# Where a build goes depends on the event (`dest` below):
 #
-# Every push to `main` ships unattended, under a tag that carries nothing but
-# the commit sha — no `latest`, no branch name, nothing a human would stumble
-# across browsing GHCR's tag list. See the `dest` step below for the exact
-# format. A `v*` tag goes through the slower, gated path described below
-# instead.
+#   pull request    amd64 only, loaded locally, never pushed
+#   push to main    pushed unattended as `sha-<7>`, which nobody can pull
+#                   without already knowing the commit
+#   v* tag          pushed to `pending-<sha>`; docker.yml's `publish` retags
+#                   that same digest after its gate and scan, so what ships is
+#                   the bytes built and attested here, never a second build
+#   dispatch        the rehearsal: the tag path up to `pending-<sha>`, so it
+#                   can be exercised any day; `publish` refuses any event but
+#                   a push, so a dispatch on a released tag cannot move `latest`
 #
-# That split is deliberate: the build is load-bearing as the MSRV check
-# (below), while publishing the tags an operator would actually reach for —
-# `latest`, a semver — should be something you choose to do, not a side
-# effect of merging. The sha-only tag is a lower-stakes middle ground: it
-# publishes unattended because nobody can pull it without already knowing the
-# exact commit that produced it.
+# Pull requests build because this is the MSRV check: the Dockerfile pins the
+# workspace's rust-version, and a developer's toolchain is always newer.
 #
-# This also doubles as the MSRV check for the whole project. docker/Dockerfile's
-# builder stage is pinned to the workspace's declared rust-version (1.98) while a
-# developer's local toolchain is invariably newer, so a build here is the only
-# thing that reliably catches code reaching past the MSRV. That is why pull
-# requests build the image even though they never publish it — amd64 only,
-# though: see the `platforms` step below for why arm64 stays a main/tag-only
-# check rather than a per-PR one.
-#
-# A `v*` tag no longer publishes straight to `:latest`/`:X.Y.Z` unattended: `build`
-# pushes the real, fully-built multi-arch image to a provisional tag nobody would
-# discover by browsing GHCR, and docker.yml's `publish` job — behind that
-# file's `gate` (signed tag, tagged commit on `main`, green ci.yml) and
-# `scan` jobs — retags exactly that
-# digest onto the tags an operator would actually pull. Nothing rebuilds between
-# the two; what gets promoted is the bytes that were already built and attested,
-# not a second, unaudited build. The `main`-push sha tag skips this entirely — see the
-# paragraph above for why that is safe to leave unattended.
-#
-# The tag is also the version the binary reports. Cargo.toml carries a fixed
-# placeholder; the `version` step below strips the `v` from the tag (or stamps
-# a dev build as `0.0.0-dev+g<sha7>`) and hands it to the Dockerfile as a build
-# arg. There is nothing to bump before tagging.
-#
-# `workflow_dispatch` is this workflow's rehearsal: `build` pushes to the same
-# provisional `pending-<sha>` tag on a manual dispatch as it does on a real `v*`
-# push (see `PUSH_IMAGE` and the `dest` step below, each with a
-# `workflow_dispatch` branch added), and gets a real
-# provenance attestation against that tag too — so the whole build-push-attest
-# path can be exercised any day, not only discovered broken the day a tag is
-# actually pushed. docker.yml's `publish` job cannot be reached this way: it
-# hard-requires `github.event_name == 'push'` in addition to the tag-ref
-# check — without that, dispatching against an *existing* `v*` tag ref alone
-# satisfies `startsWith(github.ref, 'refs/tags/v')`, so a manual dispatch
-# aimed at a released tag could reach `publish` and retag `latest`
-# unattended. The event check makes that impossible regardless of
-# environment config.
-#
-# No separate "fake version" input: this workflow's tags are git-ref-derived
-# and the fake provisional destination (`pending-<sha>`) needs no version to
-# be meaningful - the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
-# human-facing `latest`/semver tags `meta` would compute) is simply never read
-# on a dispatch, because `publish` never runs on one.
-#
-# Every build that pushes (a `main` push, a `v*` tag, a dispatch) also carries
-# an SBOM and `mode=max` build provenance inside the image index, plus signed
-# GitHub attestations for both (provenance, and one SPDX SBOM per
-# architecture) pushed to GHCR next to the digest. Every build, pushed or
-# not, is smoke-tested: `--version` and the image's own HEALTHCHECK
-# (docker/smoke_test.sh). A PR's amd64 build is loaded into the runner's
-# docker for that; a pushed build is pulled back by digest.
-#
-# Permissions: read-only by default; `build` takes `packages: write` to push
-# and `id-token: write` + `attestations: write` to sign the attestations.
+# A pushed build also carries an SBOM and `mode=max` provenance in its index,
+# plus signed GitHub attestations for both. Every build runs
+# docker/smoke_test.sh. The binary's version comes from the tag (`version`
+# below), so nothing is bumped before tagging.
 
 name: Build a Docker image
 
@@ -125,17 +68,11 @@ on:
         type: string
         default: ""
 
-# No workflow-level `concurrency:` here, deliberately: that stays in
-# docker.yml, which covers both calls to this workflow — a superseded PR
-# push cancels both in-flight builds together,
-# since docker.yml's `publish` job needs both to have succeeded anyway. A
-# group declared here would apply per-call instead, which is finer-grained
-# than docker.yml actually wants.
+# No `concurrency:` here: docker.yml's group cancels both calls together,
+# where one declared here would apply per call.
 #
-# Read-only by default; each job below elevates only the permission it needs,
-# rather than every job inheriting `packages: write` whether it pushes or not.
-# The calling job's own `permissions:` is the ceiling here — see each caller's
-# `uses:` block, which has to grant every one of these up front.
+# Read-only by default; `build` adds what it needs, within the ceiling each
+# caller's `uses:` job grants.
 permissions:
   contents: read
 
@@ -161,9 +98,8 @@ jobs:
     timeout-minutes: ${{ inputs.build-timeout }}
     permissions:
       contents: read
-      # Only actually exercised on a `v*` tag push — see the login step below —
-      # but a job's permissions are fixed before any step's `if:` is evaluated,
-      # so it has to be granted here regardless of which event triggered this run.
+      # Used only when `PUSH_IMAGE` is true, but a job's permissions are fixed
+      # before any step's `if:` is evaluated.
       packages: write
       id-token: write
       attestations: write
@@ -218,8 +154,7 @@ jobs:
       # Only when something is actually going to be pushed. A PR from a fork gets a
       # read-only GITHUB_TOKEN, so logging in would fail for exactly the
       # contributors least equipped to diagnose it — there is nothing to log in for
-      # on a PR. `workflow_dispatch` now logs in too: see the header comment's
-      # rehearsal paragraph.
+      # on a PR.
       - if: env.PUSH_IMAGE == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -274,8 +209,8 @@ jobs:
       # unattended publish path, straight to `sha-<7>` and nothing else — no
       # `latest`, no branch name — findable only by someone who already has
       # the commit sha that produced it. Matches `type=sha`'s own default
-      # naming (`meta` above, and CLAUDE.md's Repository section) so there is
-      # one sha-tag format to know, not two. The only kind that writes the
+      # naming (`meta` above), so there is one sha-tag format to know, not
+      # two. The only kind that writes the
       # build cache (`cache-to` below).
       - id: dest
         env:
@@ -296,9 +231,9 @@ jobs:
       # minus the `v`; everything else is a dev build stamped with its commit.
       # Cargo.toml's own version is a placeholder (docs/RELEASING.md, "Cutting
       # a release"); the Dockerfile hands this to crates/sharerr/build.rs as a
-      # build arg. This is also the only shape check a tag gets, and it runs
-      # before the build, so a malformed tag fails here rather than after
-      # `publish` has already moved `latest`.
+      # build arg. The shape check runs before the build, so a malformed tag
+      # fails before anything is pushed; docker.yml's `gate` repeats the same
+      # regex so its verdict stands on its own, and the two change together.
       - id: version
         env:
           REF: ${{ github.ref }}
@@ -335,11 +270,9 @@ jobs:
           # tags computed by `meta` reach GHCR only once `publish` passes its
           # gate. A `main` push ships straight to its own sha-only tag with
           # no gate — see `dest`'s comment for why. A manual
-          # `workflow_dispatch` also pushes now, to the same provisional ref a
-          # tag push would use — the rehearsal path; see the header comment.
-          # Every other event (a PR) keeps pushing nothing at all: those
-          # builds still exist solely to compile, which is what makes this
-          # job double as the MSRV gate.
+          # `workflow_dispatch` pushes to the same provisional ref a tag push
+          # would use (the rehearsal; see the header). A PR pushes nothing:
+          # it builds to prove the MSRV.
           push: ${{ env.PUSH_IMAGE == 'true' }}
           # A PR's single-platform build goes into the runner's docker instead,
           # for the smoke test below; a multi-platform build cannot be loaded.

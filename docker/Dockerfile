@@ -1,42 +1,25 @@
-# sharerr and sharerr-lighthouse — one file, two runtime images.
+# sharerr and sharerr-lighthouse: one file, so one MSRV pin, two runtime images.
 #
-# `docker/Dockerfile.lighthouse` used to be a near-identical second file: same
-# builder base, same MSRV pin, same cross-compile machinery, same runtime split —
-# differing only in which crate it built and the shape of its runtime layer. That
-# duplication is why the MSRV pin below had two copies to keep in sync (see
-# CLAUDE.md's history on this); merging removes the second copy rather than
-# relying on a comment to keep both current.
+# `--target runtime-sharerr` and `--target runtime-lighthouse` select them.
+# `runtime-sharerr` is the last stage, so a bare
+# `docker build -f docker/Dockerfile .` (the MSRV check in
+# docs/CONTRIBUTING.md, and every compose `build:` block with no `target:`)
+# builds sharerr.
 #
-# `--target runtime-sharerr` and `--target runtime-lighthouse` select the two
-# published images. `runtime-sharerr` is also the last stage in the file, so a
-# bare `docker build -f docker/Dockerfile .` — the MSRV check documented in
-# docs/CONTRIBUTING.md and .github/pull_request_template.md, and what every
-# compose `build:` block in this tree already runs with no `target:` — keeps
-# building the sharerr image with no flag.
+# No TLS system dependency: reqwest uses rustls and sqlx compiles SQLite from
+# source, so the sharerr runtime needs only CA certificates; the lighthouse
+# uses neither aws-lc-rs nor sqlx.
 #
-# No TLS system dependency: reqwest is built against rustls, and sqlx compiles
-# SQLite from source, so the sharerr runtime layer needs nothing but CA
-# certificates. sharerr-lighthouse depends on neither aws-lc-rs (its
-# ed25519-dalek dependency, curve25519-dalek, is pure Rust) nor sqlx, so it
-# has nothing to compile from source at all beyond the cross linker.
-#
-# Cross-compiled rather than emulated. `--platform=$BUILDPLATFORM` keeps the whole
-# toolchain running natively on the build host and retargets only codegen and the
-# linker. Under QEMU this build takes the better part of an hour: `lto = "thin"`
-# with `codegen-units = 1`, plus the C in aws-lc-sys and libsqlite3-sys, is exactly
-# the workload emulation is worst at.
+# Cross-compiled rather than emulated: `--platform=$BUILDPLATFORM` runs the
+# toolchain natively and retargets only codegen and the linker. Under QEMU,
+# thin LTO with one codegen unit plus the C in aws-lc-sys and libsqlite3-sys
+# takes the better part of an hour.
 
-# Pinned to the workspace's declared rust-version, so this build fails if the code
-# ever reaches past the MSRV. A developer's local toolchain will not catch that.
-#
-# The two pins drift asymmetrically: raising `rust-version` in Cargo.toml without
-# this line fails loudly here, but raising this line without Cargo.toml fails
-# nowhere — the MSRV check silently starts testing a newer toolchain. Change both.
-#
-# Every stage that compiles project code (`toolchain` and everything built from
-# it) descends from this pin — `cargo chef` is a driver that shells out to the
-# ambient `cargo`, it carries no toolchain of its own, so cooking dependencies
-# below proves nothing about the MSRV that building them directly wouldn't.
+# Pinned to Cargo.toml's rust-version, so this build fails when code reaches
+# past the MSRV. Change both together: raising only Cargo.toml fails here, but
+# raising only this line fails no build, and only tool-versions.yml's tracking
+# issue reports it. Every stage that compiles project code descends from this pin;
+# `cargo chef` shells out to this `cargo` and brings no toolchain of its own.
 FROM --platform=$BUILDPLATFORM rust:1.98-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS rust-base
 WORKDIR /src
 
