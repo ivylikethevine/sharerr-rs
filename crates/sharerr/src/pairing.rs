@@ -285,25 +285,39 @@ pub async fn pair(
                 .into_response();
         }
     }
-    let Ok(mut vault) = state.open_vault().await else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "the vault is not open").into_response();
-    };
-    let vault_key = secret_keys::peer_gossip_key(peer.id);
-    let key_stored = matches!(vault.get(&vault_key), Ok(Some(_)));
-    if peer.gossip_url.is_some() || key_stored {
-        return (
-            StatusCode::CONFLICT,
-            "already paired: this instance holds an address or key for you",
-        )
-            .into_response();
-    }
-
     // The key first: a vault write that fails leaves the row untouched, and a
     // row write that fails after it is a retry away from consistent, since the
-    // conflict check above reads both.
-    if let Err(err) = vault.put(&vault_key, &secrecy::SecretString::from(request.key)) {
-        tracing::warn!(peer = peer.id, error = %err, "pairing: could not store the key");
-        return (StatusCode::SERVICE_UNAVAILABLE, "could not store the key").into_response();
+    // conflict check reads both.
+    let has_url = peer.gossip_url.is_some();
+    let vault_key = secret_keys::peer_gossip_key(peer.id);
+    let key = request.key;
+    let stored = state
+        .with_vault(move |mut vault| {
+            let key_stored = matches!(vault.get(&vault_key), Ok(Some(_)));
+            if has_url || key_stored {
+                return Ok(Ok(false));
+            }
+            Ok(vault
+                .put(&vault_key, &secrecy::SecretString::from(key))
+                .map(|()| true))
+        })
+        .await;
+    match stored {
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "the vault is not open").into_response();
+        }
+        Ok(Ok(false)) => {
+            return (
+                StatusCode::CONFLICT,
+                "already paired: this instance holds an address or key for you",
+            )
+                .into_response();
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(peer = peer.id, error = %err, "pairing: could not store the key");
+            return (StatusCode::SERVICE_UNAVAILABLE, "could not store the key").into_response();
+        }
+        Ok(Ok(true)) => {}
     }
     match store.set_peer_gossip_url(peer.id, Some(&request.url)).await {
         Ok(true) => {}

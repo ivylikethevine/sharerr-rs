@@ -2842,7 +2842,7 @@ async fn unshare_one_reports_a_store_that_will_not_record_it() {
     let syncer = stub_syncer(Arc::new(StubClient::default())).await;
     let item = seeding_item();
     syncer.store().upsert(&item).await.unwrap();
-    syncer.store().pool().close().await;
+    syncer.store().close().await;
 
     let err = syncer.unshare_one(&item).await.unwrap_err();
     assert!(err.to_string().contains("closed"), "{err}");

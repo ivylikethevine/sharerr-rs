@@ -1162,7 +1162,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                store.touch_peer(peer.id).await.unwrap();
+                store.touch_peer(peer.id, peer.last_seen_at).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(1500)).await;
 
                 let mut notified = QuietNotified::new();
@@ -1481,7 +1481,7 @@ mod tests {
                 drop(vault);
 
                 let store = state.store().await.unwrap();
-                store.pool().close().await;
+                store.close().await;
 
                 peer_first_contact(&state, &store, 42, sharerr_store::EndpointKind::Client).await;
             });

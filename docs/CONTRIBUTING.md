@@ -41,7 +41,7 @@ Participating in any project space means abiding by the
 Rust **1.98** or newer (`rust-version` in the root `Cargo.toml`; see
 [MSRV](#msrv) for what "newer" means here), then `cargo build`.
 `SHARERR_MASTER_KEY` is not needed to build or to run the default test suite;
-nothing in tier 1 opens a real vault.
+the tests that open a vault set their own key.
 
 ## The verification loop
 
@@ -93,8 +93,9 @@ mod tests {
 
 Never weaken the workspace lint to make a test compile. A non-test `expect()`
 that genuinely cannot fail takes a targeted `#[allow]` plus a comment saying
-why; `QbitConfig::default`'s `Url::parse` on a literal (and its Transmission
-and rTorrent twins) are the only examples in the tree.
+why; `sharerr-core`'s `literal_url` and `sharerr-store`'s scope-filter lookup
+are the examples in shipped code, and `sharerr-testkit`'s mock helpers carry
+a few more.
 
 ## Test policy
 
@@ -206,10 +207,12 @@ crate, an npm package or a Terraform provider falls behind, and each bump is
 a hand edit made from its tracking issue.
 
 Every job in every workflow starts with `step-security/harden-runner`, in
-`audit` mode except the two release jobs that hold write tokens (`publish`
-and `release` in `docker.yml`), which `block` egress to an allowlist.
-`.github/scripts/lint_workflows.sh` (rule 6) fails a job that does not start
-with it.
+`audit` mode except seven jobs that `block` egress to an allowlist:
+`docker.yml`'s `publish` and `release`, `codeql.yml`'s `analyze-actions`,
+`pages.yml`'s `deploy`, `scorecard.yml`'s `analysis`, `tool-versions.yml`'s
+`check` and `rerun-timeouts.yml`'s `rerun`. All but `analysis` run a
+`dns-experiment` step before it. `.github/scripts/lint_workflows.sh` (rule 6)
+fails a job that does not start with it.
 
 `./scripts/run_codeql.sh` runs CodeQL's analysis entirely locally, worth
 doing before pushing anything that touches crypto, secret handling, or a

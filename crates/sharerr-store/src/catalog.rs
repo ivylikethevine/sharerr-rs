@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use sharerr_core::{CatalogEntry, ExternalIds, MediaSource, MediaSpec};
 use sqlx::Row;
 
-use crate::db::{Result, Store, StoreError};
+use crate::db::{Result, Store, encode_json};
 
 /// Where a torrent sharerr did not build came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ impl Store {
         .bind(source.as_str())
         .bind(file_id)
         .bind(origin.peer_id)
-        .bind(encode(&origin.upstream)?)
+        .bind(encode_json(&origin.upstream)?)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -73,14 +73,7 @@ impl Store {
         .bind(file_id)
         .fetch_optional(self.pool())
         .await?;
-        row.map(|row| {
-            Ok(ItemOrigin {
-                peer_id: row.try_get("peer_id")?,
-                upstream: serde_json::from_str(row.try_get::<&str, _>("upstream_json")?)
-                    .unwrap_or_default(),
-            })
-        })
-        .transpose()
+        row.as_ref().map(row_to_origin).transpose()
     }
 
     /// Every recorded [`ItemOrigin`], by item. A row this version cannot decode
@@ -94,15 +87,7 @@ impl Store {
             let Some(source) = MediaSource::parse(row.try_get::<&str, _>("source")?) else {
                 continue;
             };
-            let upstream =
-                serde_json::from_str(row.try_get::<&str, _>("upstream_json")?).unwrap_or_default();
-            origins.insert(
-                (source, row.try_get("file_id")?),
-                ItemOrigin {
-                    peer_id: row.try_get("peer_id")?,
-                    upstream,
-                },
-            );
+            origins.insert((source, row.try_get("file_id")?), row_to_origin(row)?);
         }
         Ok(origins)
     }
@@ -110,24 +95,57 @@ impl Store {
     /// Replace everything recorded for `peer_id`'s catalog with `entries`, in
     /// one transaction, so a reader never sees half of one pull.
     pub async fn replace_peer_catalog(&self, peer_id: i64, entries: &[CatalogEntry]) -> Result<()> {
+        // Keyed by info hash with the last entry winning, as `INSERT OR
+        // REPLACE` resolves a repeated hash.
+        let mut wanted = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            wanted.insert(
+                entry.info_hash.to_ascii_lowercase(),
+                (
+                    encode_json(&entry.spec)?,
+                    encode_json(&entry.ids)?,
+                    sharerr_core::saturating_i64(entry.size),
+                    i64::from(entry.private),
+                    entry.download_url.clone(),
+                ),
+            );
+        }
+        // Read first: this runs for every friend on every exchange, and a
+        // catalog rarely changes between two, so the usual case takes no write
+        // transaction.
+        let stored: Vec<(String, String, String, i64, i64, String)> = sqlx::query_as(
+            "SELECT info_hash, spec_json, ids_json, size, private, download_url \
+             FROM peer_catalog WHERE peer_id = ?1",
+        )
+        .bind(peer_id)
+        .fetch_all(self.pool())
+        .await?;
+        let current: HashMap<_, _> = stored
+            .into_iter()
+            .map(|(hash, spec, ids, size, private, url)| (hash, (spec, ids, size, private, url)))
+            .collect();
+        if current == wanted {
+            return Ok(());
+        }
+
         let mut tx = self.pool().begin().await?;
         sqlx::query("DELETE FROM peer_catalog WHERE peer_id = ?1")
             .bind(peer_id)
             .execute(&mut *tx)
             .await?;
-        for entry in entries {
+        for (info_hash, (spec_json, ids_json, size, private, download_url)) in &wanted {
             sqlx::query(
-                "INSERT OR REPLACE INTO peer_catalog \
+                "INSERT INTO peer_catalog \
                  (peer_id, info_hash, spec_json, ids_json, size, private, download_url) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .bind(peer_id)
-            .bind(entry.info_hash.to_ascii_lowercase())
-            .bind(encode(&entry.spec)?)
-            .bind(encode(&entry.ids)?)
-            .bind(sharerr_core::saturating_i64(entry.size))
-            .bind(i64::from(entry.private))
-            .bind(&entry.download_url)
+            .bind(info_hash)
+            .bind(spec_json)
+            .bind(ids_json)
+            .bind(size)
+            .bind(private)
+            .bind(download_url)
             .execute(&mut *tx)
             .await?;
         }
@@ -196,10 +214,13 @@ impl Store {
     }
 }
 
-fn encode(value: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(value).map_err(|e| StoreError::Malformed {
-        id: 0,
-        detail: e.to_string(),
+/// One `item_origin` row as an [`ItemOrigin`]. A row this version cannot
+/// decode reads as having no upstream tiers.
+fn row_to_origin(row: &sqlx::sqlite::SqliteRow) -> Result<ItemOrigin> {
+    Ok(ItemOrigin {
+        peer_id: row.try_get("peer_id")?,
+        upstream: serde_json::from_str(row.try_get::<&str, _>("upstream_json")?)
+            .unwrap_or_default(),
     })
 }
 
@@ -207,10 +228,8 @@ fn encode(value: &impl serde::Serialize) -> Result<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use secrecy::SecretString;
-
     use super::*;
-    use crate::PeerScope;
+    use crate::test_support::{add_peer, store_with_peer};
 
     fn episode(n: u32) -> MediaSpec {
         MediaSpec::Episode {
@@ -238,22 +257,9 @@ mod tests {
         }
     }
 
-    async fn store_with_friend(label: &str) -> (Store, i64) {
-        let store = Store::open_in_memory().await.unwrap();
-        let peer = store
-            .create_peer(
-                label,
-                &SecretString::from(format!("{label}-key")),
-                PeerScope::All,
-            )
-            .await
-            .unwrap();
-        (store, peer.id)
-    }
-
     #[tokio::test]
     async fn a_matching_entry_is_found_by_size_ids_and_slot() {
-        let (store, sam) = store_with_friend("Sam").await;
+        let (store, sam) = store_with_peer("Sam").await;
         store
             .replace_peer_catalog(sam, &[entry('a', 4, 100), entry('b', 5, 100)])
             .await
@@ -279,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pull_replaces_the_last_one_whole() {
-        let (store, sam) = store_with_friend("Sam").await;
+        let (store, sam) = store_with_peer("Sam").await;
         store
             .replace_peer_catalog(sam, &[entry('a', 4, 100)])
             .await
@@ -302,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_or_deleted_friends_catalog_is_not_offered() {
-        let (store, sam) = store_with_friend("Sam").await;
+        let (store, sam) = store_with_peer("Sam").await;
         store
             .replace_peer_catalog(sam, &[entry('a', 4, 100)])
             .await
@@ -325,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_origin_keeps_its_tiers_until_a_new_friend_or_a_rebuild_replaces_them() {
-        let (store, sam) = store_with_friend("Sam").await;
+        let (store, sam) = store_with_peer("Sam").await;
         let key = (MediaSource::Sonarr, 1001);
         let origin = |peer_id: i64, upstream: &[&str]| ItemOrigin {
             peer_id: Some(peer_id),
@@ -345,11 +351,7 @@ mod tests {
             "an adoption with no tiers to give keeps the stored ones"
         );
 
-        let alex = store
-            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
-            .await
-            .unwrap()
-            .id;
+        let alex = add_peer(&store, "Alex").await.id;
         store
             .set_item_origin(key.0, key.1, Some(&origin(alex, &[])))
             .await
@@ -394,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_this_version_cannot_decode_is_skipped() {
-        let (store, sam) = store_with_friend("Sam").await;
+        let (store, sam) = store_with_peer("Sam").await;
         store
             .replace_peer_catalog(sam, &[entry('a', 4, 100), entry('b', 4, 100)])
             .await

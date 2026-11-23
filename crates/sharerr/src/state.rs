@@ -420,10 +420,16 @@ impl ServeState {
             let config = self.config.read().await;
             (config.database_path(), (&config.retention).into())
         };
-        match Store::open(&path).await {
+        // Held across the open, and checked again under it: two first callers
+        // racing would otherwise each open a pool of their own. Taken after the
+        // config read above, never around one.
+        let mut slot = self.store.write().await;
+        if let Some(store) = &*slot {
+            return Ok(store.clone());
+        }
+        match Store::open(&path, retention).await {
             Ok(store) => {
-                store.set_retention(retention);
-                *self.store.write().await = Some(store.clone());
+                *slot = Some(store.clone());
                 Ok(store)
             }
             Err(err) => Err(format!("opening {}: {err}", path.display())),
@@ -442,6 +448,19 @@ impl ServeState {
         // every cache miss and every settings save.
         let path = self.config.read().await.vault_path();
         crate::secrets::open_vault_at(path)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// [`Self::open_vault`], then `write` over the vault in the same blocking
+    /// task: see [`crate::secrets::with_vault_at`]. An `Err` is the open
+    /// failing or whatever `write` returned, as text either way.
+    pub async fn with_vault<T: Send + 'static>(
+        &self,
+        write: impl FnOnce(Vault) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let path = self.config.read().await.vault_path();
+        crate::secrets::with_vault_at(path, move |vault| write(vault).map_err(anyhow::Error::msg))
             .await
             .map_err(|err| err.to_string())
     }
@@ -962,7 +981,7 @@ pub(crate) mod fixtures {
     /// file, which this leaves open; close it through `Syncer::store` when
     /// the arm under test sits behind the syncer's own handle.
     pub(crate) async fn close_store(state: &ServeState) {
-        state.store().await.unwrap().pool().close().await;
+        state.store().await.unwrap().close().await;
     }
 
     /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and
@@ -1002,7 +1021,9 @@ pub(crate) mod fixtures {
         // through the syncer the other way needs to be a faithful test of.
         let syncer = Syncer::new(
             config.clone(),
-            Store::open(&config.database_path()).await.unwrap(),
+            Store::open(&config.database_path(), (&config.retention).into())
+                .await
+                .unwrap(),
             sources,
             Arc::new(AlwaysReadyTracker) as Arc<dyn sharerr_torrent::TrackerProvider>,
             seeder,

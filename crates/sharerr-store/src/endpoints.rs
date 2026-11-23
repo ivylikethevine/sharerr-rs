@@ -279,22 +279,10 @@ impl Store {
         Ok(())
     }
 
-    /// The stored raw self-record for one peer, if any.
-    pub async fn peer_gossip_record(&self, peer_id: i64) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT gossip_record FROM peers WHERE id = ?1")
-            .bind(peer_id)
-            .fetch_optional(self.pool())
-            .await?;
-        Ok(row.and_then(|row| row.try_get("gossip_record").ok()))
-    }
-
-    /// [`Self::peer_gossip_record`] for every id in `peer_ids`, one round
-    /// trip instead of one per matched peer. The gossip relay endpoint used
-    /// to await this sequentially inside a `for` loop over every peer the
-    /// caller named — worse than the friends-list pages' at least-concurrent
-    /// `join_all`, since it paid each round trip one after another.
-    /// A peer with no stored record (or an id absent from `peer_ids`) is
-    /// simply absent from the returned map.
+    /// The stored raw self-record of every id in `peer_ids`, in one round trip
+    /// rather than one per peer the gossip relay endpoint's caller named. A
+    /// peer with no stored record (or an id absent from `peer_ids`) is simply
+    /// absent from the returned map.
     pub async fn peer_gossip_records(&self, peer_ids: &[i64]) -> Result<HashMap<i64, String>> {
         let slots = crate::db::placeholders(peer_ids.len());
         let sql = format!(
@@ -319,17 +307,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::peers::PeerScope;
-    use secrecy::SecretString;
-
-    async fn store_with_peer() -> (Store, i64) {
-        let store = Store::open_in_memory().await.unwrap();
-        let peer = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
-        (store, peer.id)
-    }
+    use crate::test_support::{add_peer, store_with_peer};
 
     /// Records one sighting of `addr` by `peer`.
     async fn sight(
@@ -358,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn sightings_are_recorded_newest_first_and_deduplicated() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         let api = EndpointKind::Api;
         let direct = ObservedVia::Direct;
@@ -380,7 +358,7 @@ mod tests {
     /// The replay defence: an observation cannot rewind a fresher one.
     #[tokio::test]
     async fn an_older_sighting_does_not_overwrite_a_newer_one() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         let api = EndpointKind::Api;
         sight(
@@ -415,7 +393,7 @@ mod tests {
     /// the same address.
     #[tokio::test]
     async fn a_restored_sighting_with_no_timestamp_never_overwrites_an_existing_row() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         sight(
             &store,
@@ -449,7 +427,7 @@ mod tests {
     /// this method has never seen — it only refuses to *overwrite*.
     #[tokio::test]
     async fn a_restored_sighting_with_no_timestamp_still_records_a_new_address() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         sight(
             &store,
@@ -472,7 +450,7 @@ mod tests {
     /// later comparison forever, past the point the sender's clock is fixed.
     #[tokio::test]
     async fn a_far_future_observed_at_is_clamped() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
         let far_future = now_epoch() + MAX_FUTURE_SKEW_SECS + 3600;
 
         let (api, direct) = (EndpointKind::Api, ObservedVia::Direct);
@@ -491,7 +469,7 @@ mod tests {
     /// different exits, neither overwriting the other.
     #[tokio::test]
     async fn kinds_are_recorded_separately() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         let (api, client) = (EndpointKind::Api, EndpointKind::Client);
         sight(
@@ -521,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_history_is_bounded_per_kind() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         for i in 0..20i64 {
             let addr = format!("203.0.113.5:{}", 1000 + i);
@@ -546,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_per_kind_history_follows_the_retention_setting() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
         store.set_retention(crate::Retention {
             endpoint_history: 2,
             ..crate::Retention::default()
@@ -574,7 +552,7 @@ mod tests {
     /// different one is refused rather than replacing the identity.
     #[tokio::test]
     async fn a_peers_pubkey_binds_once() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
 
         assert!(store.bind_peer_pubkey(peer, "aa11").await.unwrap());
         assert!(store.bind_peer_pubkey(peer, "aa11").await.unwrap());
@@ -602,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_a_peer_takes_their_endpoint_history_with_them() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
         sight(
             &store,
             peer,
@@ -629,19 +607,10 @@ mod tests {
     #[tokio::test]
     async fn peer_endpoints_for_groups_strictly_by_peer() {
         let store = Store::open_in_memory().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
-        let alex = store
-            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = add_peer(&store, "Sam").await;
+        let alex = add_peer(&store, "Alex").await;
         // Blair is created but never sighted — must not appear in the map.
-        let blair = store
-            .create_peer("Blair", &SecretString::from("blair-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let blair = add_peer(&store, "Blair").await;
 
         let (api, client) = (EndpointKind::Api, EndpointKind::Client);
         sight(
@@ -684,7 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_endpoints_for_an_empty_list_is_an_empty_map_not_every_peer() {
-        let (store, peer) = store_with_peer().await;
+        let (store, peer) = store_with_peer("Sam").await;
         sight(
             &store,
             peer,
@@ -704,19 +673,10 @@ mod tests {
     #[tokio::test]
     async fn peer_gossip_records_groups_strictly_by_peer() {
         let store = Store::open_in_memory().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
-        let alex = store
-            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = add_peer(&store, "Sam").await;
+        let alex = add_peer(&store, "Alex").await;
         // Blair has no gossip record — must not appear in the map.
-        let blair = store
-            .create_peer("Blair", &SecretString::from("blair-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let blair = add_peer(&store, "Blair").await;
 
         store
             .set_peer_gossip_record(sam.id, "sam-record")

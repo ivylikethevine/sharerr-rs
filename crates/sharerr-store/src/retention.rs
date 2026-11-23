@@ -44,8 +44,10 @@ impl From<&sharerr_core::config::RetentionConfig> for Retention {
 pub(crate) type RetentionCell = Arc<RwLock<Retention>>;
 
 impl crate::Store {
-    /// Replace the limits every later write prunes to. Nothing is pruned
-    /// here: a lowered limit takes effect at the next write to each table.
+    /// Replace the limits every later write prunes to, for a saved
+    /// `[retention]` reaching a store already open (`Store::open` takes the
+    /// first ones). Nothing is pruned here: a lowered limit takes effect at
+    /// the next write to each table.
     pub fn set_retention(&self, retention: Retention) {
         *self
             .retention

@@ -106,10 +106,23 @@ pub async fn open_vault_async(config: &Config) -> anyhow::Result<Vault> {
 /// [`open_vault_async`] for a caller that already has the path and would
 /// otherwise clone a whole [`Config`] to hand it over.
 pub async fn open_vault_at(path: std::path::PathBuf) -> anyhow::Result<Vault> {
+    with_vault_at(path, Ok).await
+}
+
+/// Open the vault at `path` and hand it to `f`, both off the async runtime.
+///
+/// For a caller that writes: [`Vault::put`] and [`Vault::remove`] take a
+/// process-wide mutex and a blocking cross-process file lock and then rewrite
+/// the file, which belongs on the blocking pool as much as the open does.
+pub async fn with_vault_at<T: Send + 'static>(
+    path: std::path::PathBuf,
+    f: impl FnOnce(Vault) -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
     let master = master_key_from_env()?;
 
     tokio::task::spawn_blocking(move || {
-        Vault::open(&path, &master).with_context(|| format!("opening vault at {}", path.display()))
+        f(Vault::open(&path, &master)
+            .with_context(|| format!("opening vault at {}", path.display()))?)
     })
     .await?
 }

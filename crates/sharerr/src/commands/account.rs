@@ -11,7 +11,7 @@ use sharerr_store::Store;
 /// sink (`docs/CODEQL.md`, cleartext logging).
 pub async fn disable_totp(config: &Config, login: &str) -> Result<()> {
     let path = config.database_path();
-    let store = Store::open(&path)
+    let store = Store::open(&path, (&config.retention).into())
         .await
         .with_context(|| format!("opening {}", path.display()))?;
     if !store.set_totp_secret(login, None).await? {
@@ -36,7 +36,9 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             ..Config::default()
         };
-        let store = Store::open(&config.database_path()).await.unwrap();
+        let store = Store::open(&config.database_path(), (&config.retention).into())
+            .await
+            .unwrap();
         store
             .create_user("operator", &SecretString::from(fresh_password()))
             .await

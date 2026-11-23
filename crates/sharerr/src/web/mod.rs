@@ -658,7 +658,7 @@ mod tests {
             )
             .await
             .unwrap();
-        store.touch_peer(sam.id).await.unwrap();
+        store.touch_peer(sam.id, sam.last_seen_at).await.unwrap();
         store
             .create_peer(
                 "Alex",

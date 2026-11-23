@@ -406,8 +406,8 @@ pub async fn pull(
             })
             .collect();
 
-        // One round trip for every matched peer's record, rather than
-        // awaiting `peer_gossip_record` once per peer inside this loop.
+        // One round trip for every matched peer's record, rather than one
+        // query per peer inside this loop.
         if let Ok(records) = store.peer_gossip_records(&matched_ids).await {
             for id in &matched_ids {
                 if let Some(raw) = records.get(id)
@@ -1301,7 +1301,7 @@ mod tests {
         let (store, ids) = store_with(&["Alex"]).await;
         let alex = identity(1);
         let record = record_for(&alex, "http://203.0.113.9:41234", 1000);
-        store.pool().close().await;
+        store.close().await;
 
         let summary = ingest(&store, ids[0], vec![record]).await;
 

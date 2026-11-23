@@ -18,7 +18,7 @@ Everything in `tests/fixtures/media` is synthetic (see
 - [The opt-in test suite](#the-opt-in-test-suite)
 - [Seeding tagged content](#seeding-tagged-content)
 - [Views of one library](#views-of-one-library)
-- [The six stacks](#the-six-stacks)
+- [The seven stacks](#the-seven-stacks)
 - [Ports](#ports)
 - [The two-instance stack](#the-two-instance-stack)
   - [Why Prowlarr sits in front of instance B's Radarr](#why-prowlarr-sits-in-front-of-instance-bs-radarr)
@@ -144,7 +144,7 @@ always do, and identical mounts would hide every path-mapping bug:
 which turns "sharerr never writes to what it shares" into something the
 kernel enforces.
 
-## The six stacks
+## The seven stacks
 
 | Stack        | File                       | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

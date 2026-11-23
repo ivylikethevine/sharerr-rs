@@ -49,12 +49,6 @@ clap = "4.6.7"
 # nothing next to the HTTP request carrying it. `rand_core` stays off — key
 # material comes from the same `getrandom` path as every other secret.
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
-# Cross-process advisory `flock` on the vault's lock file. `std::fs::File::lock`
-# does the same job and landed in Rust 1.89 - now below this workspace's MSRV
-# (raised to 1.98 on 2026-08-24 for let-chains, see `edition` above), so this
-# is a candidate to drop in favor of std the next time vault.rs is touched,
-# not a pin std still can't replace.
-fd-lock = "4.0.4"
 figment = "0.10.19"
 # The facade over the futures-util that reqwest and axum already pull in;
 # used for join_all over dynamically-sized sets of independent requests.

@@ -1645,7 +1645,7 @@ async fn rebuild_and_unshare_redirect_with_the_stores_error_when_the_write_fails
         .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
         .await
         .unwrap();
-    serve.syncer().await.unwrap().store().pool().close().await;
+    serve.syncer().await.unwrap().store().close().await;
     let state = web_state(serve);
 
     for response in [

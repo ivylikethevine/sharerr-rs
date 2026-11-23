@@ -1339,19 +1339,23 @@ async fn apply_secret(
         return Ok(false);
     }
 
-    let mut vault = state.serve.open_vault().await?;
-
-    if clear {
-        vault
-            .remove(key)
-            .map_err(|err| format!("removing {key}: {err}"))?;
-        tracing::info!(key, "secret cleared through the web ui");
-    } else {
-        vault
-            .put(key, &SecretString::from(value))
-            .map_err(|err| format!("storing {key}: {err}"))?;
-        tracing::info!(key, "secret stored through the web ui");
-    }
+    state
+        .serve
+        .with_vault(move |mut vault| {
+            if clear {
+                vault
+                    .remove(key)
+                    .map_err(|err| format!("removing {key}: {err}"))?;
+                tracing::info!(key, "secret cleared through the web ui");
+            } else {
+                vault
+                    .put(key, &SecretString::from(value))
+                    .map_err(|err| format!("storing {key}: {err}"))?;
+                tracing::info!(key, "secret stored through the web ui");
+            }
+            Ok(())
+        })
+        .await?;
 
     Ok(true)
 }
@@ -1397,10 +1401,12 @@ async fn mutate_tracker_token(
     state: &WebState,
     log_msg: &str,
     invalidate_reason: &str,
-    f: impl FnOnce(&mut Vault) -> Result<(), String>,
+    f: impl FnOnce(&mut Vault) -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
-    let mut vault = state.serve.open_vault().await?;
-    f(&mut vault)?;
+    state
+        .serve
+        .with_vault(move |mut vault| f(&mut vault))
+        .await?;
     tracing::info!("{log_msg}");
 
     state.serve.invalidate(invalidate_reason).await;
@@ -1418,7 +1424,10 @@ async fn rotate_tracker_token(state: &WebState, new_value: &str) -> Result<(), S
         state,
         "tracker token rotated through the web ui",
         "the tracker token rotated",
-        |vault| rotate_tracker_token_in(vault, new_value),
+        {
+            let new_value = new_value.to_owned();
+            move |vault| rotate_tracker_token_in(vault, &new_value)
+        },
     )
     .await
 }
