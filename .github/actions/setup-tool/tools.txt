@@ -82,7 +82,7 @@ gitleaks|8.30.1|tar.gz|https://github.com/gitleaks/gitleaks/releases/download/v%
 # For .claude/plan-scan, whose patterns need PCRE2: the musl release is built
 # with it, where the runner image's apt ripgrep may not be.
 rg|15.2.0|tar.gz|https://github.com/BurntSushi/ripgrep/releases/download/%v/ripgrep-%v-x86_64-unknown-linux-musl.tar.gz|--pcre2-version|github:BurntSushi/ripgrep||33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
-typos|1.52.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||6155d4114f9a0f5b8f6d4fda96266c9d5f6add71df80da7f684ee5e72eb14588
+typos|1.52.2|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||3b13d1291281d39d01822e54035636487a7a0f228e70097899b1e33aeb0e7e93
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
 # works, by expecting its own subcommand name as the first argument even when
@@ -94,7 +94,7 @@ typos|1.52.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typo
 cargo-llvm-cov|0.9.1|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov||b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
 # Tags have no "v" (0.20.2); the blank tag-prefix accepts that. Like trivy, the
 # advisory database is fetched fresh on every run, whatever this pin is.
-cargo-deny|0.20.2|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/download/%v/cargo-deny-%v-x86_64-unknown-linux-musl.tar.gz|--version|github:EmbarkStudios/cargo-deny||9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+cargo-deny|0.21.0|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/download/%v/cargo-deny-%v-x86_64-unknown-linux-musl.tar.gz|--version|github:EmbarkStudios/cargo-deny||a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903
 # A cargo subcommand plugin like cargo-llvm-cov: verify names its own
 # subcommand first. Advisory in ci.yml until a crate is published; see
 # scripts/check.sh's check_semver.
@@ -106,7 +106,7 @@ cargo-mutants|27.1.0|tar.gz|https://github.com/sourcefrog/cargo-mutants/releases
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the
 # tags the drift check reads.
-terraform|1.17.1|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061
+terraform|1.17.2|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b
 # mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
 # the Python yq, but CI pins this one).
 # Installed rather than taken from the runner image, and several distros ship
