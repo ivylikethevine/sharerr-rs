@@ -348,20 +348,25 @@ pub async fn set_gossip(
 
     // The key is optional and write-only, same rules as every stored secret:
     // blank means leave alone, the checkbox means clear.
-    let key = form.key.trim();
-    if !key.is_empty() || form.clear_key.is_some() {
-        let mut vault = match state.serve.open_vault().await {
-            Ok(vault) => vault,
-            Err(reason) => return rejected(&state, &reason).await,
-        };
-        let vault_key = secret_keys::peer_gossip_key(id);
-        let result = if form.clear_key.is_some() {
-            vault.remove(&vault_key).map(|_| ())
-        } else {
-            vault.put(&vault_key, &SecretString::from(key.to_owned()))
-        };
-        if let Err(err) = result {
-            return rejected(&state, &format!("could not store the key: {err}")).await;
+    let key = form.key.trim().to_owned();
+    let clear = form.clear_key.is_some();
+    if !key.is_empty() || clear {
+        let written = state
+            .serve
+            .with_vault(move |mut vault| {
+                let vault_key = secret_keys::peer_gossip_key(id);
+                let result = if clear {
+                    vault.remove(&vault_key).map(|_| ())
+                } else {
+                    vault.put(&vault_key, &SecretString::from(key))
+                };
+                Ok(result.map_err(|err| format!("could not store the key: {err}")))
+            })
+            .await;
+        // The outer `Err` is the vault not opening, rejected as it reads; the
+        // inner one the write itself.
+        if let Err(reason) = written.and_then(|written| written) {
+            return rejected(&state, &reason).await;
         }
     }
 
@@ -380,11 +385,18 @@ pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
         // will not open now is a startup problem the operator already knows
         // about, not a reason to fail a delete that has already happened.
         // `peers.id` is AUTOINCREMENT, so a leftover can never re-attach.
-        match state.serve.open_vault().await {
-            Ok(mut vault) => {
-                if let Err(err) = vault.remove(&secret_keys::peer_gossip_key(id)) {
-                    tracing::warn!(peer_id = id, error = %err, "could not remove the friend's gossip key");
-                }
+        let removed = state
+            .serve
+            .with_vault(move |mut vault| {
+                Ok(vault
+                    .remove(&secret_keys::peer_gossip_key(id))
+                    .map_err(|err| err.to_string()))
+            })
+            .await;
+        match removed {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(peer_id = id, error = %err, "could not remove the friend's gossip key");
             }
             Err(err) => {
                 tracing::warn!(peer_id = id, error = %err, "could not open the vault to remove the friend's gossip key");

@@ -75,8 +75,9 @@ between the two views, and identical mounts would hide a mapping bug.
 reason nothing gets shared. `docker compose exec sharerr sharerr doctor`
 resolves each mapping against the files that are there;
 `sharerr doctor --suggest-paths` proposes them by searching `/media`. Worth
-running before the first sync, and worth setting `skip_checking = false` for
-the first run so qBittorrent verifies the mapping instead of trusting it.
+running before the first sync, and worth setting
+[`skip_checking = false`](../../docs/SETTINGS.md#qbittorrent) for the first
+run so qBittorrent verifies the mapping instead of trusting it.
 
 ## One port, several audiences
 
@@ -92,12 +93,10 @@ Three ways to handle that, in rough order of how much they buy you:
 
 1. **A TLS reverse proxy** in front, with `tracker.advertised_url` set to the
    `https://` address so announce URLs match what friends can reach, and
-   `X-Forwarded-Proto` set so sharerr marks the session cookie `Secure`. Note
-   that sharerr's own login throttle (see below) keys on the connecting
-   socket's address and never a forwarded-for header, so behind this every
-   request collapses to the proxy's own address and the throttle degrades to
-   a global limit across every visitor — bring the proxy's own per-client
-   rate limiting if that matters to you.
+   `X-Forwarded-Proto` set so sharerr marks the session cookie `Secure`. List
+   the proxy in `server.trusted_proxies`, or the login throttle (see below)
+   sees every visitor as the proxy's one address and becomes a single global
+   limit; see [`[server]`](../../docs/SETTINGS.md#server).
 2. **A second, tracker-only listener** via `tracker.bind`. It carries the
    tracker routes and `.torrent` downloads and not the UI, so you can forward
    that port and leave 8477 on loopback.
@@ -105,10 +104,10 @@ Three ways to handle that, in rough order of how much they buy you:
    internet. sharerr throttles `/login` and `/setup` per source address (5
    attempts/minute, 429 past it) and caps concurrent password hashing
    store-wide, so a flood cannot turn Argon2's own cost into a resource
-   exhaustion attack — but there is still no account lockout (deliberate; see
-   [the security policy](../../docs/SECURITY.md#what-is-in-scope)) and no
-   security response headers, so this remains the option that buys the
-   least.
+   exhaustion attack. There is still no account lockout (deliberate; see
+   [the security policy](../../docs/SECURITY.md#what-is-in-scope)), and the
+   security response headers stay off until `server.security_headers = true`,
+   so this remains the option that buys the least.
 
 sharerr opens no BitTorrent peer port of its own. The `6881` in these files
 is always qBittorrent's.

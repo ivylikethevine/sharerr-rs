@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Argon2, Params};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
@@ -20,10 +20,9 @@ use zeroize::Zeroizing;
 use sharerr_core::endpoint::now_epoch;
 
 use crate::db::{Result, Store, StoreError};
-
-/// Length of the raw salt before base64 encoding. 16 bytes is the Argon2
-/// reference implementation's recommendation and matches the vault's salt.
-const SALT_LEN: usize = 16;
+// The raw salt's length before base64 encoding: the vault's, 16 bytes, the
+// Argon2 reference implementation's recommendation.
+use crate::vault::SALT_LEN;
 
 /// Argon2id cost parameters for login password hashing. Spelled out
 /// explicitly for the same reason as `sharerr-store::vault`'s identical
@@ -49,7 +48,7 @@ const ARGON2_PARAMS: Params =
     };
 
 fn hasher() -> Argon2<'static> {
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, ARGON2_PARAMS.clone())
+    crate::vault::argon2id(ARGON2_PARAMS.clone())
 }
 
 impl Store {
@@ -235,10 +234,6 @@ async fn acquire_slot(
     }
 }
 
-async fn acquire_hash_slot() -> Result<tokio::sync::SemaphorePermit<'static>> {
-    acquire_slot(&HASH_SLOTS, HASH_SLOT_WAIT).await
-}
-
 impl Store {
     /// A slot for one Argon2 run, or `TooBusy`; a fault plan can refuse it.
     async fn hash_slot(&self) -> Result<tokio::sync::SemaphorePermit<'static>> {
@@ -246,7 +241,7 @@ impl Store {
         if self.fault.hash_slot_refused() {
             return Err(StoreError::TooBusy);
         }
-        acquire_hash_slot().await
+        acquire_slot(&HASH_SLOTS, HASH_SLOT_WAIT).await
     }
 }
 

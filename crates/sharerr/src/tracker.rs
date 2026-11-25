@@ -290,6 +290,7 @@ async fn handle_announce(
             state,
             &store,
             peer_id,
+            auth.last_seen_at,
             EndpointKind::Client,
             Some(&addr.to_string()),
         )
@@ -418,6 +419,9 @@ async fn is_served(state: &ServeState, info_hash: &InfoHash) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct TokenAuth {
     attributed_to: Option<i64>,
+    /// The attributed peer's `last_seen_at` as the lookup read it, for the
+    /// sighting's throttle.
+    last_seen_at: Option<i64>,
     via_previous: bool,
 }
 
@@ -507,6 +511,7 @@ async fn authenticate_token(
     match store.peer_by_key_hash(supplied).await {
         Ok(Some(peer)) => Ok(TokenAuth {
             attributed_to: Some(peer.id),
+            last_seen_at: peer.last_seen_at,
             ..TokenAuth::default()
         }),
         Ok(None) => Err(AnnounceError::BadToken),
@@ -746,8 +751,8 @@ mod tests {
             )
             .await,
             Ok(TokenAuth {
-                attributed_to: None,
                 via_previous: true,
+                ..TokenAuth::default()
             })
         );
         assert_eq!(
@@ -789,6 +794,7 @@ mod tests {
             authenticate_token(&store, Some("s3cret"), None, Some(&sam.key_hash)).await,
             Ok(TokenAuth {
                 attributed_to: Some(sam.id),
+                last_seen_at: sam.last_seen_at,
                 via_previous: false,
             })
         );
@@ -820,6 +826,7 @@ mod tests {
             &serve,
             &store,
             sam.id,
+            sam.last_seen_at,
             EndpointKind::Client,
             Some("203.0.113.9:51413"),
         )

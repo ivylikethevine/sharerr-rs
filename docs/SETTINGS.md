@@ -154,12 +154,12 @@ be filled in and tested before switching to it.
 
 ### `[qbittorrent]`
 
-| TOML key                    | Type   | Default                 | Notes                                                                                                                                                                                                                                                                       |
-| --------------------------- | ------ | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qbittorrent.url`           | url    | `http://localhost:8080` |                                                                                                                                                                                                                                                                             |
-| `qbittorrent.category`      | string | `sharerr`               | Category applied to torrents sharerr creates.                                                                                                                                                                                                                               |
-| `qbittorrent.tag`           | string | `sharerr`               | Tag applied alongside the category.                                                                                                                                                                                                                                         |
-| `qbittorrent.skip_checking` | bool   | `true`                  | Skip qBittorrent's hash check on add — see [the README](../README.md#authenticating-to-qbittorrent) and the trap in [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#traps) before turning this off partway through setting up path mappings. |
+| TOML key                    | Type   | Default                 | Notes                                                                                                                                                                                                                                |
+| --------------------------- | ------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `qbittorrent.url`           | url    | `http://localhost:8080` |                                                                                                                                                                                                                                      |
+| `qbittorrent.category`      | string | `sharerr`               | Category applied to torrents sharerr creates.                                                                                                                                                                                        |
+| `qbittorrent.tag`           | string | `sharerr`               | Tag applied alongside the category.                                                                                                                                                                                                  |
+| `qbittorrent.skip_checking` | bool   | `true`                  | Skip qBittorrent's hash check on add, so a new torrent seeds at once. With the check skipped, a wrong `[[path_map]]` entry seeds mismatched data instead of qBittorrent refusing it: set this `false` until the mappings are proven. |
 
 Vault secret: `qbittorrent.api_key` (a qBittorrent 5.2+ WebUI API key — the
 sole credential; there is no username/password fallback).
@@ -406,7 +406,7 @@ say, and shows what the service answered.
 | `notifications.kind`            | string           | `generic`         | Which payload shape to send: `generic`, `discord`, `apprise`, `ntfy`, `gotify`, `telegram` or `pushover`. Each one's webhook URL is below.                     |
 | `notifications.peer_quiet_secs` | int              | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
 | `notifications.heartbeat_secs`  | int              | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
-| `notifications.triggers`        | array of strings | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
+| `notifications.triggers`        | array of strings | all twelve, below | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
 The twelve triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
@@ -660,7 +660,8 @@ form pins its field in the UI just as the plain one does.
 secret) is the one setting that has no `sharerr.toml` equivalent at all,
 since it is what encrypts the vault the file's own secrets would otherwise
 need to unlock. It, `SHARERR_CONFIG`, `SHARERR_LOG_FORMAT` (the CLI's
-`--log-format`, read before the config loads), and the opt-in test suites'
+`--log-format`, read before the config loads), `SHARERR_VERSION` (the
+build's version stamp, read at compile time), and the opt-in test suites'
 own `SHARERR_E2E_*` variables (tiers 2 and 3) are the only `SHARERR_*` names
 that are not config fields; any other unrecognised `SHARERR_*` variable is
 a startup error, same as an unknown key in the file.

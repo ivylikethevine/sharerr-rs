@@ -100,7 +100,7 @@ whole design is built around.
   a read-only [management API](docs/SETTINGS.md#api) behind its own token,
   and an OpenAPI 3.1 document for the machine-facing API.
 
-Which apps, clients and indexers are supported, how the three clients differ,
+Which apps, clients and indexers are supported, how the four clients differ,
 and what was tried and deliberately left out is in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
@@ -429,14 +429,12 @@ and re-adding the friend, since the key inside it is shown only once.
 
 A friend who stops showing up can be reported rather than noticed: with a
 webhook URL stored as `notifications.webhook_url`, sharerr POSTs there on
-whichever of nine triggers are enabled (a sync failing, a friend going quiet
-or making first contact, the advertised endpoint rotating or the tracker
-behind it going unreachable, items newly shared or failing to share, a library
-path becoming unreadable, a friend's key being revoked), as generic JSON or in
+whichever of eleven triggers are enabled (a friend going quiet, a sync
+failing and a shared file changing among them), as generic JSON or in
 Discord's, Apprise's, ntfy's, Gotify's, Telegram's or Pushover's own shape. A
-tenth, the heartbeat, goes the other way: a push to an Uptime-Kuma-style URL
-while the instance is ready, so a monitor notices the silence. Field
-reference: [`[notifications]`](docs/SETTINGS.md#notifications).
+twelfth, the heartbeat, goes the other way: a push to an Uptime-Kuma-style URL
+while the instance is ready, so a monitor notices the silence. The triggers
+and fields: [`[notifications]`](docs/SETTINGS.md#notifications).
 
 ## Topology
 
@@ -620,7 +618,7 @@ lint policy, the MSRV check, and what CI runs;
 
 ## Layout
 
-Twelve crates, one workspace, two binaries. The crate map, how a share moves
+One workspace, two binaries. The crate map, how a share moves
 end to end, and where state lives are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the original design brief and
 the two premises the implementation disproved are in

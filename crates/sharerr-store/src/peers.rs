@@ -147,7 +147,8 @@ pub struct PeerLimits {
     /// resolution stays offered: music and books have none, and a cap on video
     /// should not hide them.
     pub max_height: Option<i64>,
-    /// The name `<tag>-<friend>` tags call this friend, from [`friend_slug`].
+    /// The name `<tag>-<friend>` tags call this friend, from their label as
+    /// `friend_slug` folds it.
     pub friend: Option<String>,
 }
 
@@ -177,7 +178,7 @@ impl PeerLimits {
 /// folded to single dashes, since the *arr apps lowercase a tag and allow little
 /// else. `Sam B.` is `sam-b`, tagged `sharerr-sam-b`. Empty for a name with no
 /// ASCII letter or digit, which no tag can then name.
-pub fn friend_slug(label: &str) -> String {
+fn friend_slug(label: &str) -> String {
     let mut slug = String::with_capacity(label.len());
     for c in label.chars() {
         if c.is_ascii_alphanumeric() {
@@ -347,14 +348,7 @@ impl Store {
 
     /// Every peer not revoked, newest first: the friends who count.
     pub async fn active_peers(&self) -> Result<Vec<Peer>> {
-        let rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT {PEER_COLUMNS} FROM peers WHERE revoked_at IS NULL \
-             ORDER BY created_at DESC, id DESC"
-        )))
-        .fetch_all(self.pool())
-        .await?;
-
-        rows.iter().map(row_to_peer).collect()
+        self.peers_where("WHERE revoked_at IS NULL").await
     }
 
     /// Every peer, newest first, revoked ones included.
@@ -363,8 +357,14 @@ impl Store {
     /// something an operator needs to be able to see, and a row that vanishes looks
     /// like a bug.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
+        self.peers_where("").await
+    }
+
+    /// Every peer `filter` (a fixed `WHERE` clause, or nothing) admits, newest
+    /// first.
+    async fn peers_where(&self, filter: &'static str) -> Result<Vec<Peer>> {
         let rows = sqlx::query(AssertSqlSafe(format!(
-            "SELECT {PEER_COLUMNS} FROM peers ORDER BY created_at DESC, id DESC"
+            "SELECT {PEER_COLUMNS} FROM peers {filter} ORDER BY created_at DESC, id DESC"
         )))
         .fetch_all(self.pool())
         .await?;
@@ -420,16 +420,14 @@ impl Store {
     /// first sightings observes [`Touch::First`] — a `SELECT` then `UPDATE`
     /// would let two announces in the same instant both report it.
     ///
-    /// A read first, though, so a sighting inside the window takes no write lock:
-    /// SQLite takes it for an `UPDATE` even when no row matches, and this runs on
-    /// every authenticated feed request.
-    pub async fn touch_peer(&self, id: i64) -> Result<Touch> {
+    /// `seen` is the [`Peer::last_seen_at`] the caller just authenticated the
+    /// peer with, so a sighting inside the window takes no write lock and no
+    /// second read: SQLite takes the lock for an `UPDATE` even when no row
+    /// matches, and this runs on every authenticated feed request. A value
+    /// gone stale since is safe either way: the guards on both `UPDATE`s
+    /// decide against the row as it is now.
+    pub async fn touch_peer(&self, id: i64, seen: Option<i64>) -> Result<Touch> {
         let now = now_epoch();
-        let seen: Option<i64> = sqlx::query_scalar("SELECT last_seen_at FROM peers WHERE id = ?1")
-            .bind(id)
-            .fetch_optional(self.pool())
-            .await?
-            .flatten();
         if seen.is_some_and(|seen| seen >= now - TOUCH_WINDOW_SECS) {
             return Ok(Touch::Throttled);
         }
@@ -882,7 +880,7 @@ mod tests {
             .unwrap();
         assert_eq!(sam.last_seen_at, None);
 
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
+        assert_eq!(store.touch_peer(sam.id, None).await.unwrap(), Touch::First);
 
         let listed = store.list_peers().await.unwrap();
         assert!(
@@ -901,8 +899,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Throttled);
+        assert_eq!(store.touch_peer(sam.id, None).await.unwrap(), Touch::First);
+        let seen = store.peer(sam.id).await.unwrap().unwrap().last_seen_at;
+        assert_eq!(
+            store.touch_peer(sam.id, seen).await.unwrap(),
+            Touch::Throttled
+        );
+        assert_eq!(
+            store.touch_peer(sam.id, None).await.unwrap(),
+            Touch::Throttled,
+            "a caller that read the row before the first touch still loses the race"
+        );
         assert!(!Touch::Throttled.updated());
         assert!(Touch::Refreshed.updated());
         assert!(Touch::First.updated());
@@ -1021,14 +1028,22 @@ mod tests {
             .create_peer("Sam", &key("sam-key"), PeerScope::All)
             .await
             .unwrap();
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
+        assert_eq!(store.touch_peer(sam.id, None).await.unwrap(), Touch::First);
 
         sqlx::query("UPDATE peers SET last_seen_at = last_seen_at - 600 WHERE id = ?1")
             .bind(sam.id)
             .execute(store.pool())
             .await
             .unwrap();
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Refreshed);
-        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Throttled);
+        let stale = store.peer(sam.id).await.unwrap().unwrap().last_seen_at;
+        assert_eq!(
+            store.touch_peer(sam.id, stale).await.unwrap(),
+            Touch::Refreshed
+        );
+        assert_eq!(
+            store.touch_peer(sam.id, stale).await.unwrap(),
+            Touch::Throttled,
+            "the UPDATE's own guard refuses a second refresh read from the same stale row"
+        );
     }
 }

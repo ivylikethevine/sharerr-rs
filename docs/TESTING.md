@@ -45,11 +45,12 @@ that assumes a column every row has, fails there. A new migration needs its
 rows added to that module's `seed` and its expectations to `check`; the
 level loop picks the new version up by itself.
 
-**No tier-1 fixture opens a real vault.** `state::fixtures::unconfigured()`
-has no master key, so vault-backed accessors resolve to "unavailable" there.
-Prefer testing store-backed logic directly, with the store and the resolved
-secret as plain parameters. When a test genuinely needs the vault open, or
-needs the master key _absent_, wrap it in `figment::Jail::expect_with`; see
+**One fixture opens a real vault: `state::fixtures::with_open_vault`.**
+`state::fixtures::unconfigured()` has no master key, so vault-backed accessors
+resolve to "unavailable" there. Prefer testing store-backed logic directly,
+with the store and the resolved secret as plain parameters. A test that
+genuinely needs the vault open uses `with_open_vault`; one that needs the
+master key _absent_ wraps itself in `figment::Jail::expect_with`; see
 [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#testing-tiers)
 for why a bare `std::env::set_var` races the parallel runner, and the fixture
 names worth knowing.

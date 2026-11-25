@@ -126,8 +126,9 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (creating if needed) the database at `path` and apply migrations.
-    pub async fn open(path: &Path) -> Result<Self> {
+    /// Open (creating if needed) the database at `path` and apply migrations,
+    /// pruning the self-growing tables to `retention` (see [`crate::retention`]).
+    pub async fn open(path: &Path, retention: crate::Retention) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| StoreError::DataDir {
                 path: parent.to_path_buf(),
@@ -150,7 +151,7 @@ impl Store {
         // `busy_timeout` does not cover it), before either reaches
         // `MIGRATOR.run`. See `MIGRATE_LOCK`.
         let _guard = MIGRATE_LOCK.lock().await;
-        Self::from_options(opts, 5).await
+        Self::from_options(opts, 5, retention).await
     }
 
     /// An ephemeral database, for tests.
@@ -160,10 +161,14 @@ impl Store {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         // A single connection: each new connection to `:memory:` would otherwise
         // get its own empty database.
-        Self::from_options(opts, 1).await
+        Self::from_options(opts, 1, crate::Retention::default()).await
     }
 
-    async fn from_options(opts: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
+    async fn from_options(
+        opts: SqliteConnectOptions,
+        max_connections: u32,
+        retention: crate::Retention,
+    ) -> Result<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             // Recycling a connection is ordinarily harmless, but for `:memory:` the
@@ -176,15 +181,21 @@ impl Store {
         MIGRATOR.run(&pool).await?;
         Ok(Self {
             pool,
-            retention: Default::default(),
+            retention: std::sync::Arc::new(std::sync::RwLock::new(retention)),
             #[cfg(feature = "fault-injection")]
             fault: std::sync::Arc::new(crate::fault::Fault::new()),
         })
     }
 
+    /// Close the database: every later query on this handle, and on every
+    /// clone of it, fails as a database that went away would.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// The underlying pool, for queries that live in sibling modules. Every
     /// query on this type goes through here, so a fault plan sees each one.
-    pub fn pool(&self) -> &SqlitePool {
+    pub(crate) fn pool(&self) -> &SqlitePool {
         #[cfg(feature = "fault-injection")]
         {
             self.fault.pool(&self.pool)
@@ -228,8 +239,9 @@ impl Store {
     /// The builtin tracker's admission check: it answers only for torrents sharerr
     /// made, so it never becomes an open tracker that strangers can register
     /// swarms on. Either of a hybrid torrent's two identities admits it (see
-    /// [`Self::set_info_hash_v2`]). Hits `idx_shared_items_info_hash`, because
-    /// it runs on every announce from every peer.
+    /// [`Self::set_info_hash_v2`]). Runs on every announce from every peer, so
+    /// the unary `+` on `state` keeps the planner off `idx_shared_items_state`
+    /// (which matches most of the table) and on the two info-hash indexes.
     ///
     /// `Unshared` and `Failed` items are excluded deliberately — withdrawing a
     /// share has to stop the tracker introducing peers for it, or the swarm
@@ -237,7 +249,7 @@ impl Store {
     pub async fn is_shared(&self, info_hash: &str) -> Result<bool> {
         let row = sqlx::query(
             "SELECT 1 AS present FROM shared_items \
-             WHERE (info_hash = ?1 OR info_hash_v2 = ?1) AND state IN (?2, ?3) LIMIT 1",
+             WHERE (info_hash = ?1 OR info_hash_v2 = ?1) AND +state IN (?2, ?3) LIMIT 1",
         )
         .bind(info_hash)
         .bind(ShareState::Seeding.as_str())
@@ -257,29 +269,27 @@ impl Store {
     /// for a narrowly-scoped friend.
     pub async fn seeding_items(&self, scope: crate::PeerScope) -> Result<Vec<SharedItem>> {
         let filter = scope_filter(scope);
-        // `AssertSqlSafe`: everything interpolated is this module's own
-        // constants — see `ScopeFilter::new`; the peer scope itself travels
-        // through `.bind()`.
-        let mut query = sqlx::query(AssertSqlSafe(filter.items_sql.as_str()));
-        for value in &filter.binds {
-            query = query.bind(*value);
-        }
-        let rows = query.fetch_all(self.pool()).await?;
+        let rows = filter
+            .query(&filter.items_sql)
+            .fetch_all(self.pool())
+            .await?;
         rows.iter().map(row_to_item).collect()
     }
 
-    /// How many items `scope` may see right now, and their total size in bytes
-    /// — the same rows [`Self::seeding_items`] returns, aggregated in SQL
-    /// rather than decoded. The status page and metrics ask it for
-    /// [`crate::PeerScope::All`]; neither needs the rows themselves.
-    pub async fn seeding_summary(&self, scope: crate::PeerScope) -> Result<SeedingSummary> {
-        let filter = scope_filter(scope);
-        let mut query = sqlx::query_as(AssertSqlSafe(filter.summary_sql.as_str()));
-        for value in &filter.binds {
-            query = query.bind(*value);
-        }
-        let (count, size): (i64, i64) = query.fetch_one(self.pool()).await?;
-        Ok(SeedingSummary { count, size })
+    /// How many items are seeding right now, and their total size in bytes —
+    /// the rows [`Self::seeding_items`] returns for [`crate::PeerScope::All`],
+    /// aggregated in SQL rather than decoded, for the status page and metrics.
+    /// A friend's own count comes from [`Self::seeding_summaries`].
+    pub async fn seeding_summary(&self) -> Result<SeedingSummary> {
+        let filter = scope_filter(crate::PeerScope::All);
+        let row = filter
+            .query(&filter.summary_sql)
+            .fetch_one(self.pool())
+            .await?;
+        Ok(SeedingSummary {
+            count: row.try_get(0)?,
+            size: row.try_get(1)?,
+        })
     }
 
     /// One item by its stable identity. The pair is the key — `file_id` alone is not
@@ -390,31 +400,15 @@ impl Store {
     }
 
     /// Execute an [`item_update!`] query, binding its trailing `updated_at`,
-    /// `source` and `file_id`.
+    /// `source` and `file_id`; reports whether the item existed.
     async fn update_item(
         &self,
         query: SqliteQuery<'_>,
         source: MediaSource,
         file_id: i64,
-    ) -> Result<()> {
-        self.update_item_counted(query, source, file_id).await?;
-        Ok(())
-    }
-
-    /// [`Self::update_item`], returning how many rows changed.
-    async fn update_item_counted(
-        &self,
-        query: SqliteQuery<'_>,
-        source: MediaSource,
-        file_id: i64,
-    ) -> Result<u64> {
-        Ok(query
-            .bind(now_epoch())
-            .bind(source.as_str())
-            .bind(file_id)
-            .execute(self.pool())
-            .await?
-            .rows_affected())
+    ) -> Result<bool> {
+        self.changed(query.bind(now_epoch()).bind(source.as_str()).bind(file_id))
+            .await
     }
 
     /// Record a state transition, clearing or setting the error message with it.
@@ -433,6 +427,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Mark an item seeding under `info_hash`, in one write.
@@ -482,6 +477,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// [`Self::set_ratio`], plus recording which token an already-seeding
@@ -517,6 +513,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Record what the torrent client itself reports for an already-seeding
@@ -541,6 +538,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Record the file's identity on disk for the torrent sharerr just built
@@ -560,6 +558,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Every recorded [`FileStamp`], keyed like [`SharedItem::key`], for one
@@ -592,11 +591,8 @@ impl Store {
         file_id: i64,
         until: Option<i64>,
     ) -> Result<bool> {
-        let query = item_update!("share_until = ?");
-        let affected = self
-            .update_item_counted(query.bind(until), source, file_id)
-            .await?;
-        Ok(affected > 0)
+        self.update_item(item_update!("share_until = ?").bind(until), source, file_id)
+            .await
     }
 
     /// Every set share-until date, keyed like [`SharedItem::key`], for one
@@ -642,6 +638,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Give an item an info hash with no other change, for a test setting up a row.
@@ -659,6 +656,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(drop)
     }
 
     /// Clear an item's torrent identity back to "never shared", so a fresh
@@ -748,14 +746,12 @@ pub(crate) fn placeholders(n: usize) -> String {
 /// see, and the binder that fills its placeholders in the same order.
 ///
 /// One definition for [`Store::seeding_items`] and [`Store::seeding_summary`]:
-/// the feed and the count shown next to a friend's name must agree about
-/// what "TV only" admits, and two hand-written copies of this clause would
-/// not stay agreeing.
+/// the feed and the seeding count must agree about what a scope admits, and
+/// two hand-written copies of this clause would not stay agreeing.
 struct ScopeFilter {
     items_sql: String,
     summary_sql: String,
     /// Every placeholder value in either statement, in the order they name them.
-    /// All are static strings, so one list serves `query` and `query_as` alike.
     binds: Vec<&'static str>,
 }
 
@@ -785,6 +781,18 @@ fn scope_filter(scope: crate::PeerScope) -> &'static ScopeFilter {
 }
 
 impl ScopeFilter {
+    /// `sql`, one of this filter's own statements, with every placeholder bound.
+    fn query<'a>(&'a self, sql: &'a str) -> SqliteQuery<'a> {
+        // `AssertSqlSafe`: everything interpolated is this module's own
+        // constants — see `ScopeFilter::new`; the peer scope itself travels
+        // through `.bind()`.
+        self.binds
+            .iter()
+            .fold(sqlx::query(AssertSqlSafe(sql)), |query, value| {
+                query.bind(*value)
+            })
+    }
+
     fn new(scope: crate::PeerScope) -> Self {
         // Derived from `PeerScope::allows` over the fixed source list — the SQL
         // fragment interpolates only the placeholder count, never input.
@@ -892,7 +900,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
 }
 
 /// Serialise a column value to JSON, wrapping a failure as [`StoreError::Malformed`].
-fn encode_json(value: &impl serde::Serialize) -> Result<String> {
+pub(crate) fn encode_json(value: &impl serde::Serialize) -> Result<String> {
     serde_json::to_string(value).map_err(|e| StoreError::Malformed {
         id: 0,
         detail: e.to_string(),
@@ -1712,8 +1720,7 @@ mod tests {
     }
 
     /// The aggregate must count and size exactly the rows the feed returns:
-    /// same filter, same scope semantics — a pending item and an out-of-scope
-    /// one contribute to neither.
+    /// same filter, so a pending item contributes to neither.
     #[tokio::test]
     async fn seeding_summary_aggregates_the_same_rows_the_feed_returns() {
         let store = Store::open_in_memory().await.unwrap();
@@ -1735,7 +1742,7 @@ mod tests {
             .unwrap();
         store.upsert(&seeding(movie(4), "cc", 4_000)).await.unwrap();
 
-        let all = store.seeding_summary(crate::PeerScope::All).await.unwrap();
+        let all = store.seeding_summary().await.unwrap();
         assert_eq!(
             all,
             SeedingSummary {
@@ -1743,25 +1750,16 @@ mod tests {
                 size: 7_000
             }
         );
-
-        let tv = store.seeding_summary(crate::PeerScope::Tv).await.unwrap();
-        let feed = store.seeding_items(crate::PeerScope::Tv).await.unwrap();
-        assert_eq!(tv.count as usize, feed.len());
+        let feed = store.seeding_items(crate::PeerScope::All).await.unwrap();
+        assert_eq!(all.count as usize, feed.len());
         assert_eq!(
-            tv.size.unsigned_abs(),
+            all.size.unsigned_abs(),
             feed.iter().map(|i| i.size).sum::<u64>()
-        );
-        assert_eq!(
-            tv,
-            SeedingSummary {
-                count: 2,
-                size: 3_000
-            }
         );
 
         let empty = Store::open_in_memory().await.unwrap();
         assert_eq!(
-            empty.seeding_summary(crate::PeerScope::All).await.unwrap(),
+            empty.seeding_summary().await.unwrap(),
             SeedingSummary::default(),
             "an empty table must sum to zero, not NULL"
         );
@@ -1975,14 +1973,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/deeper/sharerr.db");
 
-        let store = Store::open(&path).await.unwrap();
+        let store = Store::open(&path, crate::Retention::default())
+            .await
+            .unwrap();
         store.upsert(&movie(4242)).await.unwrap();
         assert!(path.exists());
 
         // Reopening the same file must find the data, and re-running migrations
         // against an already-migrated database must be a no-op.
         drop(store);
-        let reopened = Store::open(&path).await.unwrap();
+        let reopened = Store::open(&path, crate::Retention::default())
+            .await
+            .unwrap();
         assert_eq!(reopened.all_items().await.unwrap().len(), 1);
     }
 
@@ -1997,7 +1999,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sharerr.db");
 
-        let (a, b) = tokio::join!(Store::open(&path), Store::open(&path));
+        let (a, b) = tokio::join!(
+            Store::open(&path, crate::Retention::default()),
+            Store::open(&path, crate::Retention::default())
+        );
         a.unwrap();
         b.unwrap();
     }

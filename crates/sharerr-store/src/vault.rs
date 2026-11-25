@@ -36,7 +36,7 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
 const VERSION: u8 = 1;
-const SALT_LEN: usize = 16;
+pub(crate) const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 
@@ -208,19 +208,14 @@ impl Vault {
     pub fn open(path: impl Into<PathBuf>, master: &SecretString) -> Result<Self> {
         let path = path.into();
 
-        let Some(raw) = read_if_present(&path)? else {
-            let salt = crate::random_array::<SALT_LEN>()
-                .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?;
-            let cipher = derive_cipher(master, &salt)?;
-            return Ok(Self {
-                path,
-                salt,
-                cipher,
-                records: BTreeMap::new(),
-            });
+        let (salt, records) = match read_if_present(&path)? {
+            Some(raw) => parse(&raw)?,
+            None => (
+                crate::random_array::<SALT_LEN>()
+                    .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?,
+                BTreeMap::new(),
+            ),
         };
-
-        let (salt, records) = parse(&raw)?;
         let cipher = derive_cipher(master, &salt)?;
         let vault = Self {
             path,
@@ -301,8 +296,12 @@ impl Vault {
     /// disk now.
     fn locked<T>(&mut self, mutate: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let _guard = write_lock();
-        let mut file_lock = cross_process_lock(&self.path)?;
-        let _file_guard = lock_write(&mut file_lock, &self.path)?;
+        // Held until `file_lock` drops at the end of this call, which closes
+        // the descriptor and releases it.
+        let file_lock = cross_process_lock(&self.path)?;
+        file_lock
+            .lock()
+            .map_err(io_err(&self.path.with_extension("lock")))?;
         self.reload()?;
         mutate(self)
     }
@@ -361,7 +360,8 @@ impl Vault {
     }
 
     /// Whether anything is stored yet — true on a fresh instance.
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
@@ -454,28 +454,17 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
 /// [`Vault::persist`] replaces the vault file via `rename` — an `flock` held
 /// on the pre-rename inode would stop guarding the path the moment the next
 /// writer opens it fresh. A lock file that is never renamed has no such gap.
-fn cross_process_lock(vault_path: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+fn cross_process_lock(vault_path: &Path) -> Result<std::fs::File> {
     let lock_path = vault_path.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .map_err(io_err(&lock_path))?;
-    Ok(fd_lock::RwLock::new(file))
-}
-
-/// Block until the cross-process lock is held, reporting failure against the
-/// `.lock` path (not the caller's file descriptor) so the error is legible.
-fn lock_write<'a>(
-    lock: &'a mut fd_lock::RwLock<std::fs::File>,
-    vault_path: &Path,
-) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>> {
-    lock.write()
-        .map_err(io_err(&vault_path.with_extension("lock")))
+        .map_err(io_err(&lock_path))
 }
 
 #[cfg(unix)]
@@ -489,10 +478,14 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn derive_cipher(master: &SecretString, salt: &[u8; SALT_LEN]) -> Result<XChaCha20Poly1305> {
-    use argon2::{Algorithm, Argon2, Version};
+/// Argon2id, version 0x13, under `params`: the one algorithm this crate
+/// hashes with, for the vault's key and for login passwords alike.
+pub(crate) fn argon2id(params: argon2::Params) -> argon2::Argon2<'static> {
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
 
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, ARGON2_PARAMS.clone());
+fn derive_cipher(master: &SecretString, salt: &[u8; SALT_LEN]) -> Result<XChaCha20Poly1305> {
+    let argon = argon2id(ARGON2_PARAMS.clone());
 
     let mut key = SecretBox::new(Box::new([0u8; KEY_LEN]));
     argon
@@ -514,27 +507,21 @@ fn parse(raw: &[u8]) -> Result<([u8; SALT_LEN], BTreeMap<String, Record>)> {
         return Err(VaultError::UnsupportedVersion { found: raw[0] });
     }
 
+    let mut cursor = 1;
     // The salt actually stored in this vault file; it was random when generated.
-    // The length is already guaranteed by the header check above.
-    let salt: [u8; SALT_LEN] = raw[1..1 + SALT_LEN]
-        .try_into()
-        .map_err(|_| VaultError::Corrupt("salt header is the wrong length"))?;
+    let salt = take_array::<SALT_LEN>(raw, &mut cursor)?;
 
     let mut records = BTreeMap::new();
-    let mut cursor = 1 + SALT_LEN;
-
     while cursor < raw.len() {
-        let key_len = read_u16(raw, &mut cursor)? as usize;
+        let key_len = usize::from(u16::from_le_bytes(take_array(raw, &mut cursor)?));
         let key_bytes = take(raw, &mut cursor, key_len)?;
         let key = std::str::from_utf8(key_bytes)
             .map_err(|_| VaultError::Corrupt("record key is not UTF-8"))?
             .to_owned();
 
-        let nonce_bytes = take(raw, &mut cursor, NONCE_LEN)?;
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(nonce_bytes);
+        let nonce = take_array::<NONCE_LEN>(raw, &mut cursor)?;
 
-        let ct_len = read_u32(raw, &mut cursor)? as usize;
+        let ct_len = u32::from_le_bytes(take_array(raw, &mut cursor)?) as usize;
         let ciphertext = take(raw, &mut cursor, ct_len)?.to_vec();
 
         records.insert(key, Record { nonce, ciphertext });
@@ -554,14 +541,11 @@ fn take<'a>(raw: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]> {
     Ok(slice)
 }
 
-fn read_u16(raw: &[u8], cursor: &mut usize) -> Result<u16> {
-    let bytes = take(raw, cursor, 2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(raw: &[u8], cursor: &mut usize) -> Result<u32> {
-    let bytes = take(raw, cursor, 4)?;
-    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+/// The next `N` bytes as a fixed-size array.
+fn take_array<const N: usize>(raw: &[u8], cursor: &mut usize) -> Result<[u8; N]> {
+    take(raw, cursor, N)?
+        .try_into()
+        .map_err(|_| VaultError::Corrupt("record truncated"))
 }
 
 #[cfg(test)]
@@ -749,12 +733,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let vault_path = dir.path().join("vault.bin");
 
-        let mut first = cross_process_lock(&vault_path).unwrap();
-        let _held = first.write().unwrap();
+        let first = cross_process_lock(&vault_path).unwrap();
+        first.lock().unwrap();
 
-        let mut second = cross_process_lock(&vault_path).unwrap();
-        let err = second.try_write().unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        let second = cross_process_lock(&vault_path).unwrap();
+        let err = second.try_lock().unwrap_err();
+        assert!(
+            matches!(err, std::fs::TryLockError::WouldBlock),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -763,12 +750,12 @@ mod tests {
         let vault_path = dir.path().join("vault.bin");
 
         {
-            let mut first = cross_process_lock(&vault_path).unwrap();
-            let _held = first.write().unwrap();
+            let first = cross_process_lock(&vault_path).unwrap();
+            first.lock().unwrap();
         }
 
-        let mut second = cross_process_lock(&vault_path).unwrap();
-        assert!(second.try_write().is_ok());
+        let second = cross_process_lock(&vault_path).unwrap();
+        assert!(second.try_lock().is_ok());
     }
 
     #[test]

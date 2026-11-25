@@ -986,6 +986,7 @@ async fn check_api_key(
                     state,
                     &store,
                     peer.id,
+                    peer.last_seen_at,
                     sharerr_store::EndpointKind::Api,
                     remote.map(|ip| ip.to_string()).as_deref(),
                 )
@@ -1035,14 +1036,18 @@ async fn check_api_key(
 /// ([`sharerr_store::Touch::First`]), and that is the one event here worth
 /// telling the operator about — the moment a key they handed out was
 /// actually used.
+///
+/// `last_seen_at` is the peer's as the caller just authenticated them; see
+/// [`sharerr_store::Store::touch_peer`].
 pub(crate) async fn record_sighting(
     state: &ServeState,
     store: &sharerr_store::Store,
     peer_id: i64,
+    last_seen_at: Option<i64>,
     kind: sharerr_store::EndpointKind,
     addr: Option<&str>,
 ) {
-    let touch = match store.touch_peer(peer_id).await {
+    let touch = match store.touch_peer(peer_id, last_seen_at).await {
         Ok(touch) => touch,
         Err(err) => {
             tracing::warn!(peer_id, error = %err, "could not touch a peer's last-seen time");

@@ -334,13 +334,11 @@ impl Syncer {
     /// the syncer. One-shot commands build a static one from configuration.
     pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
         Self::build_with_store(config, endpoint, async {
-            let store = Store::open(&config.database_path())
-                .await
-                .with_context(|| format!("opening {}", config.database_path().display()))?;
             // This handle closes the runs it records, so it is the one that prunes
             // them.
-            store.set_retention((&config.retention).into());
-            Ok(store)
+            Store::open(&config.database_path(), (&config.retention).into())
+                .await
+                .with_context(|| format!("opening {}", config.database_path().display()))
         })
         .await
     }

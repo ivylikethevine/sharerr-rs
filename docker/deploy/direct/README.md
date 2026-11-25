@@ -101,7 +101,8 @@ run elsewhere. The full comparison is
   discards a save. Configure in `config/sharerr.toml` or the UI.
 - **`skip_checking = true` trusts the mappings.** While you are still proving
   the `[[path_map]]` entries right, set it `false` so qBittorrent verifies
-  the data instead of seeding a mismatch.
+  the data instead of seeding a mismatch
+  ([`qbittorrent.skip_checking`](../../../docs/SETTINGS.md#qbittorrent)).
 - **Already running Sonarr and Radarr?** Delete both services and point the
   `[sonarr]`/`[radarr]` URLs at wherever they live, or start from
   [`sidecar/`](../sidecar/README.md), which is this stack with everything but

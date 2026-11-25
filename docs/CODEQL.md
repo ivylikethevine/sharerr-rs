@@ -17,7 +17,7 @@ and out of scope for a security report is in [`SECURITY.md`](SECURITY.md).
 ## Path injection on the config path
 
 **The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
-`config_io.rs`** is guarded rather than dismissed, by a `..` check inlined
+`web/config_io/mod.rs`** is guarded rather than dismissed, by a `..` check inlined
 into `ConfigFile::open`, `ConfigFile::write_validated` and
 `ConfigFile::backup_path`. The value is always `ServeState::config_path()`,
 set once at process start from `--config` or `SHARERR_CONFIG` and never
@@ -34,7 +34,7 @@ worked example of a query whose only recognised barrier costs something,
 unlike the `cleartext-logging` findings below.
 
 `backup_path` needed the guard a second time because it is a second,
-independent sink: `web/settings.rs` calls it on a `ConfigFile::replacing`
+independent sink: `web/settings/mod.rs` calls it on a `ConfigFile::replacing`
 value — which, unlike `open`, never checks its path up front — from inside
 the settings handler. It returns `None` on a `..` or non-UTF-8 path rather
 than an error, since its only job is naming a backup for the operator to
@@ -52,7 +52,7 @@ local and rebuilds the `Path` the sinks use from it; the comment in
 ## Cleartext logging of vault key names
 
 **The vault key _names_ `rust/cleartext-logging` used to flag in
-`commands/doctor.rs`**, and the operator's own username alongside them, are
+`commands/doctor/mod.rs`**, and the operator's own username alongside them, are
 fixed rather than dismissed. `TorrentClientConfig`'s three fields were
 `username`, `api_key_key` and `password_key` — `Option<&'static str>` (or
 `Option<&'a str>` for the username), holding only `secret_keys` constants
@@ -81,12 +81,12 @@ of the field that had been renamed. Those two config fields
 constants exactly as they were. Operators see no change.
 
 A later round found the same query still flagging the `println!` in
-`doctor.rs`'s `Report::fail`, this time one hop further upstream than any
+`doctor`'s `Report::fail`, this time one hop further upstream than any
 field: `SensitiveDataHeuristics.qll` treats a matching **function name**,
 not just a field or variable, as a source at every call site. Two functions
 qualified purely by name — `secret_keys::api_key_for` and
 `GluetunTarget::api_key_secret`, both `Option<&'static str>` accessors
-returning a vault _key name_, never a value — alongside `doctor.rs`'s own
+returning a vault _key name_, never a value — alongside `doctor`'s own
 `fn secret`/`fn quiet_secret` and every local (`api_key`, `api_key_for_fix`,
 …) that carried a real `SecretString` from vault to client but happened to
 sit on a path that also reaches a `report.fail(...)` call naming the key.

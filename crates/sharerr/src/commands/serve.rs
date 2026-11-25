@@ -1005,7 +1005,7 @@ mod tests {
             .syncer()
             .await
             .expect("setup: the fixture's syncer must be present");
-        syncer.store().pool().close().await;
+        syncer.store().close().await;
 
         let (status, body) = ready(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

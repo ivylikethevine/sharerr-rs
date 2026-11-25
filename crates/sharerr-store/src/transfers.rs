@@ -91,10 +91,8 @@ impl Store {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use secrecy::SecretString;
-
     use super::*;
-    use crate::PeerScope;
+    use crate::test_support::add_peer;
 
     #[tokio::test]
     async fn a_fresh_store_has_one_zero_row() {
@@ -108,10 +106,7 @@ mod tests {
     #[tokio::test]
     async fn an_attributed_delta_lands_on_the_friend_and_the_total() {
         let store = Store::open_in_memory().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = add_peer(&store, "Sam").await;
         assert_eq!((sam.downloaded, sam.uploaded), (0, 0));
 
         store
@@ -130,10 +125,7 @@ mod tests {
     #[tokio::test]
     async fn an_unattributed_delta_reaches_only_the_total() {
         let store = Store::open_in_memory().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = add_peer(&store, "Sam").await;
 
         store.record_transfer(None, 0, 2_048).await.unwrap();
 
@@ -157,10 +149,7 @@ mod tests {
     #[tokio::test]
     async fn the_total_survives_deleting_the_friend_it_came_from() {
         let store = Store::open_in_memory().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = add_peer(&store, "Sam").await;
         store.record_transfer(Some(sam.id), 10, 0).await.unwrap();
         assert!(store.delete_peer(sam.id).await.unwrap());
 

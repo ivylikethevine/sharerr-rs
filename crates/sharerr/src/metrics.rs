@@ -106,7 +106,7 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
     if let Ok(store) = state.store().await {
         let (counts, seeding, runs, peers, transfer) = tokio::join!(
             store.counts_by_state(),
-            store.seeding_summary(sharerr_store::PeerScope::All),
+            store.seeding_summary(),
             store.recent_runs(1),
             store.active_peers(),
             store.transfer_totals(),
@@ -838,7 +838,13 @@ mod tests {
             .create_peer("alex", &key("alex"), sharerr_store::PeerScope::All)
             .await
             .unwrap();
-        assert!(store.touch_peer(seen.id).await.unwrap().updated());
+        assert!(
+            store
+                .touch_peer(seen.id, seen.last_seen_at)
+                .await
+                .unwrap()
+                .updated()
+        );
         store
             .create_peer("quiet", &key("quiet"), sharerr_store::PeerScope::All)
             .await

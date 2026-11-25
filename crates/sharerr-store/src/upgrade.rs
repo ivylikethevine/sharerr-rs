@@ -355,7 +355,12 @@ async fn check(store: &Store, version: i64) {
             assert_eq!(endpoints[0].kind, EndpointKind::Client);
             assert_eq!(endpoints[0].addr, "203.0.113.9:51413");
             assert_eq!(
-                store.peer_gossip_record(sam.id).await.unwrap().as_deref(),
+                store
+                    .peer_gossip_records(&[sam.id])
+                    .await
+                    .unwrap()
+                    .get(&sam.id)
+                    .map(String::as_str),
                 Some("{}")
             );
         } else {
@@ -402,7 +407,13 @@ async fn writes_still_work(store: &Store, version: i64) {
         )
         .await
         .unwrap();
-    assert!(store.touch_peer(sam.id).await.unwrap().updated());
+    assert!(
+        store
+            .touch_peer(sam.id, sam.last_seen_at)
+            .await
+            .unwrap()
+            .updated()
+    );
     store
         .record_peer_endpoint(
             sam.id,
@@ -523,7 +534,7 @@ async fn a_database_from_every_earlier_level_upgrades_with_its_rows_intact() {
         let path = dir.path().join("sharerr.db");
         database_at(&path, version).await;
 
-        let store = Store::open(&path)
+        let store = Store::open(&path, crate::Retention::default())
             .await
             .unwrap_or_else(|err| panic!("upgrading from v{version} failed: {err}"));
         check(&store, version).await;
@@ -532,7 +543,9 @@ async fn a_database_from_every_earlier_level_upgrades_with_its_rows_intact() {
         // The upgraded file reopens as a current one: nothing left pending,
         // nothing re-applied.
         drop(store);
-        let again = Store::open(&path).await.unwrap();
+        let again = Store::open(&path, crate::Retention::default())
+            .await
+            .unwrap();
         check(&again, version).await;
         writes_still_work(&again, version).await;
         file_is_sound(&again).await;
@@ -545,9 +558,13 @@ async fn a_database_from_every_earlier_level_upgrades_with_its_rows_intact() {
 async fn a_current_database_records_each_migration_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sharerr.db");
-    let store = Store::open(&path).await.unwrap();
+    let store = Store::open(&path, crate::Retention::default())
+        .await
+        .unwrap();
     drop(store);
-    let store = Store::open(&path).await.unwrap();
+    let store = Store::open(&path, crate::Retention::default())
+        .await
+        .unwrap();
 
     let applied: i64 = sqlx::query("SELECT COUNT(*) AS n FROM _sqlx_migrations")
         .fetch_one(store.pool())

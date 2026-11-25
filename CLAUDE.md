@@ -59,9 +59,9 @@ from there:
 `lighthouse.quiet_secs` are config keys, not constants, specifically so tier
 3 does not have to wait out the production defaults (`docs/SETTINGS.md`)
 to see a mesh converge.** They deliberately have no settings-page field and
-no `config_paths` entry, unlike every other interval in `Config` — a web
-field with no floor (there is one on purpose; see `GossipConfig`'s own doc
-in `crates/sharerr-core/src/config.rs`) would be a standing invitation to
+no `config_paths` entry, unlike every other interval in `Config` — the keys
+have no floor, on purpose (see `GossipConfig`'s own doc in
+`crates/sharerr-core/src/config.rs`), so a web field for them would be a standing invitation to
 set it to a few seconds in production and hammer every friend's instance.
 `sharerr.toml` or a `SHARERR_GOSSIP__*` / `SHARERR_LIGHTHOUSE__*` override
 still reaches them, same as any other config key.
@@ -71,11 +71,13 @@ Fixtures worth knowing by name: `state::fixtures::{unconfigured, unloadable}`
 returned `TempDir` alive), `store_unopenable` and `store_closed` (a database
 that never opens, or one that opened and then stops answering every query;
 `close_store(&state)` injects the second after a test has seeded rows, and
-a syncer's own handle is closed through `Syncer::store().pool()`),
+a syncer's own handle is closed through `Syncer::store().close()`),
 `Store::fail_after(n)` and `busy_after(n)` for a store that answers n more
 queries (or grants n more password hashes) and then fails every later one
 (sharerr-store's `fault-injection` feature, on only through sharerr's
 dev-dependency; every clone of a `Store` shares the fault),
+`with_open_vault(config, seed, body)` for a state whose vault really opens
+(in a `Jail` with a master key, seeded by `seed`),
 `web::web_state(serve)` for a `WebState` around one of those,
 `test_support::StubClient`'s `fail_remove` / `fail_set_limits` /
 `fail_add_trackers` for a torrent client that refuses one call, and
@@ -83,17 +85,16 @@ dev-dependency; every clone of a `Store` shares the fault),
 multipart_field, QBIT_API_KEY, ARR_API_KEY}` for wiremock-backed service
 clients.
 
-**No tier-1 fixture opens a real vault.** `fixtures::unconfigured()` has no
-master key, so `ServeState::open_vault`/`tracker_token`/`gossip_identity`
-resolve to "unavailable" there. Prefer testing store-backed logic directly
-(pass `Store` and the resolved secret as plain parameters, the way
+**One fixture opens a real vault: `fixtures::with_open_vault`.**
+`fixtures::unconfigured()` has no master key, so
+`ServeState::open_vault`/`tracker_token`/`gossip_identity` resolve to
+"unavailable" there. Prefer testing store-backed logic directly (pass `Store`
+and the resolved secret as plain parameters, the way
 `tracker::authenticate_token` does). When a test genuinely needs the vault
-open, the one sanctioned way is `figment::Jail::expect_with` with
-`jail.set_env("SHARERR_MASTER_KEY", ..)`; see `state.rs`'s
-`vault_backed_accessors_succeed_and_cache_once_the_vault_opens`. `Jail`
-scopes the variable and serialises against every other Jail test in the
-binary; a bare `std::env::set_var` does neither and races the parallel
-runner.
+open, use `with_open_vault`, which runs inside `figment::Jail::expect_with`
+with `jail.set_env("SHARERR_MASTER_KEY", ..)`. `Jail` scopes the variable and
+serialises against every other Jail test in the binary; a bare
+`std::env::set_var` does neither and races the parallel runner.
 
 **A test that needs the master key _absent_ is just as exposed.**
 `master_key_from_env` reads the real process environment, and this binary's
@@ -105,7 +106,7 @@ window, then reproduces deterministically, so a green suite is not evidence
 the race is absent. Wrap this class in `Jail` too, with `jail.clear_env()`
 and nothing else; see `secrets.rs`'s
 `opening_a_vault_without_a_master_key_fails_with_no_side_effects` or
-`web/settings.rs`'s
+`web/settings/tests.rs`'s
 `save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config`.
 
 ### CodeQL
@@ -166,7 +167,7 @@ version, CI's `msrv` job, and the two breaches that shipped are in
 keyed by the constants in `sharerr_core::config::secret_keys`. Adding a
 secret means adding it to `secret_keys::ALL` (or `commands/vault.rs` silently
 rejects it) _and_ wiring the constant into the relevant handler in
-`web/settings.rs`, which does not consult `ALL`: each save handler passes its
+`web/settings/mod.rs`, which does not consult `ALL`: each save handler passes its
 own secret key to `write_config_and_secret` (Transmission and rTorrent share
 `save_rpc_client`). The one documented exception is the `[[peers]]`
 bootstrap block, drained into the vault by `commands/serve::import_peers` on
@@ -191,14 +192,12 @@ already sits; the release title is what the feed advertises. See
 `sharerr-torrent`.
 
 **`skip_checking = true` seeds a wrong mapping instead of refusing it.** It
-is the default, so qBittorrent seeds a newly added torrent immediately rather
-than re-verifying it. Set it `false` while still confirming a path mapping:
-with checking skipped, a wrong mapping seeds mismatched data instead of
-qBittorrent refusing it.
+is the default; set it `false` while a path mapping is unproven
+([`docs/SETTINGS.md`](docs/SETTINGS.md#qbittorrent)).
 
 **The config file is rewritten in place by the web UI**, comments and all,
 via `toml_edit`. A settings path is a hand-typed string in more than one
-place; check `web/settings.rs` and `web/templates/settings.html` agree.
+place; check `web/settings/mod.rs` and `web/templates/settings.html` agree.
 
 **`config_io::env_overrides()` is memoised in a `OnceLock`.** A test that
 sets a `SHARERR_*` variable (even inside a `Jail`) and then renders the
@@ -206,7 +205,7 @@ settings or wizard page sees whatever the _first_ caller in the binary saw.
 Test lock detection through `collect_overrides(vars)` with an explicit
 iterator, as `config_io`'s tests do.
 
-**Every `web/settings.rs` form field must be `#[serde(default)]`.** An
+**Every `web/settings` form field must be `#[serde(default)]`.** An
 `<input>` can render `disabled` (no master key yet, or pinned by a
 `SHARERR_*` variable), and a disabled input submits nothing. A `Form` field
 with no default then fails to deserialize _before_ the handler runs, so
@@ -298,10 +297,10 @@ after a run of reused merges the cache is whatever the last full push (or a
 manual dispatch on `main`, which never reuses) wrote.
 
 **Every job starts with `step-security/harden-runner`**, with the
-`egress-policy` spelled out: `audit` everywhere except `docker.yml`'s
-`publish` and `release`, which hold write tokens and `block` to an allowlist.
+`egress-policy` spelled out: `audit`, or `block` to an allowlist in the seven
+jobs [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#what-ci-runs) lists.
 `lint_workflows.sh` rule 6 fails a job without it (the action's own default
-is `block`, which with no allowlist would cut a job off); those two have a
+is `block`, which with no allowlist would cut a job off); a blocking job has a
 `dns-experiment` step before it, which the rule says why.
 
 **`image-scan.yml` runs two scans that answer different questions.** `trivy`
@@ -398,11 +397,10 @@ tracking issue, reading the compose files `CI_IMAGE_GLOBS` in
 
 ### Pinned tools
 
-**Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
-cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck, hadolint,
-trivy, cargo-deny, gitleaks, terraform, yq and cargo-mutants, each installed from a cached, pinned,
-sha256-verified release asset by `.github/actions/setup-tools` (cargo-mutants
-only through `scripts/check.sh --install`: no job runs it).
+**Pinned tool versions that dependabot cannot see** are every row of
+`tools.txt` (below), each installed from a cached, pinned, sha256-verified
+release asset by `.github/actions/setup-tools` (cargo-mutants only through
+`scripts/check.sh --install`: no job runs it).
 `.github/actions/setup-tool/tools.txt` is the one roster (version, URL,
 archive kind, verify flag, sha256, per platform where the asset differs),
 read by that action through `setup-tool/install.sh`, by `check_tool_versions.sh`, and by

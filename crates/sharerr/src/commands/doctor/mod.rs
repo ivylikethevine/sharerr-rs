@@ -439,7 +439,7 @@ fn credential(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<S
 
 async fn check_database(config: &Config, report: &mut Report) {
     let path = config.database_path();
-    match Store::open(&path).await {
+    match Store::open(&path, (&config.retention).into()).await {
         Ok(store) => {
             report.ok(format!("opened {} and applied migrations", path.display()));
             match store.counts_by_state().await {

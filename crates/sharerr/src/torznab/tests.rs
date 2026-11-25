@@ -1476,12 +1476,13 @@ async fn a_sighting_that_cannot_be_recorded_is_dropped_quietly() {
         .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
         .await
         .unwrap();
-    store.pool().close().await;
+    store.close().await;
 
     record_sighting(
         &state,
         &store,
         sam.id,
+        sam.last_seen_at,
         sharerr_store::EndpointKind::Api,
         Some("203.0.113.9"),
     )
@@ -1505,6 +1506,7 @@ async fn a_sighting_whose_address_cannot_be_recorded_keeps_the_touch() {
         &state,
         &store,
         sam.id,
+        sam.last_seen_at,
         sharerr_store::EndpointKind::Api,
         Some("203.0.113.9"),
     )

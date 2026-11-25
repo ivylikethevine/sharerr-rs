@@ -16,7 +16,7 @@ reference](API.md) go deeper on two parts this page only summarises.
 
 ## Crate map
 
-Twelve crates under `crates/`, one workspace, two binaries (`sharerr` and
+Thirteen crates under `crates/`, one workspace, two binaries (`sharerr` and
 `sharerr-lighthouse`). This table is the one place the crate list is kept;
 everything else links here.
 
@@ -109,7 +109,7 @@ flowchart LR
 
 - **`sharerr-store`**: one SQLite database under `data_dir` (`shared_items`,
   `sync_runs`, `users`, `peers`, `peer_endpoints`, `swarm_samples`,
-  `transfer_totals`) plus the encrypted vault file and the generated
+  `transfer_totals`, `item_audience`, `peer_catalog`, `item_origin`) plus the encrypted vault file and the generated
   `.torrent` files.
 - **`sharerr.toml`**: non-secret configuration only. Rewritten in place by
   the web UI via `toml_edit`, comments and all.
@@ -129,8 +129,8 @@ the same shape is not re-proposed by a later pass over the same code.
   and intervals. Unifying them is over-abstraction.
 - **`tracker.rs`'s `#[allow(dead_code)]`** on `AnnounceParams`/`ScrapeParams`:
   documentation-only utoipa shapes with a stated reason.
-- **`doctor.rs` vs `checks.rs`**: the parallel `check_*` names are not
-  duplication; `doctor.rs` delegates into `checks::` and wraps for reporting.
+- **`commands/doctor` vs `checks.rs`**: the parallel `check_*` names are not
+  duplication; `doctor` delegates into `checks::` and wraps for reporting.
 - **`sharerr-transmission` as one file**: at ~550 production lines it is
   under the threshold where a module split pays for itself.
 - **`sharerr-probe`'s two metadata loops** (Matroska, ISO-BMFF): track
@@ -143,6 +143,6 @@ the same shape is not re-proposed by a later pass over the same code.
   sides carry comments arguing for the split.
 - **A shared trait across the torrent-client backends** already exists
   (`sharerr-client`'s `TorrentClient`) at the right altitude.
-- **Collapsing `Config::torrent_client_for`'s three match arms**: only 2 of
-  its 10 fields are backend-agnostic. Every extraction tried cost more in
+- **Collapsing `Config::torrent_client_for`'s four match arms**: each of
+  its seven fields varies by backend. Every extraction tried cost more in
   indirection than the lines it removed.

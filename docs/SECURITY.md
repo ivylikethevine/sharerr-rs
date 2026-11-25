@@ -191,12 +191,11 @@ The assurance case follows from [the threat model](#threat-model):
   `sha-<7>` included, carries signed build provenance and an SPDX SBOM
   checkable with `gh attestation verify`, and `image-scan.yml` re-scans both
   published images weekly. CI itself runs with least-privilege tokens,
-  SHA-pinned actions, sha256-pinned tools (hadolint, trivy, cargo-deny,
-  gitleaks, terraform, yq and the rest of `tools.txt`) and lockfile-pinned
-  npm tools (an advisory against one that has no patched release is accepted
-  with a reason in `.github/osv-scanner.toml`), and `step-security/harden-runner` audits every job's network
-  egress, blocking it outright in the two release jobs that hold write
-  tokens. The detail is in [`RELEASING.md`](RELEASING.md) and
+  SHA-pinned actions, sha256-pinned tools (every row of `tools.txt`) and
+  lockfile-pinned npm tools (an advisory against one that has no patched
+  release is accepted with a reason in `.github/osv-scanner.toml`), and
+  `step-security/harden-runner` audits every job's network egress, blocking
+  it outright in seven jobs, the two release jobs among them. The detail is in [`RELEASING.md`](RELEASING.md) and
   [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs).
 - **What this does not cover, by design**: no account lockout, security
   response headers off unless `server.security_headers` is set, no recovery
